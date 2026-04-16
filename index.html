@@ -6,7 +6,7 @@
 <title>Service Compris !</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#080810;overflow:hidden;width:100vw;height:100vh;font-family:'Segoe UI',Tahoma,sans-serif;user-select:none;touch-action:none;-webkit-touch-callout:none}
+body{background:#080810;overflow:hidden;width:100vw;height:100vh;font-family:'Segoe UI',Tahoma,sans-serif;user-select:none;touch-action:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
 #title-screen{position:fixed;inset:0;z-index:1000;display:flex;flex-direction:column;align-items:center;justify-content:center;background:radial-gradient(ellipse at center,#1a1020,#080410 70%,#000);transition:opacity .6s}
 #title-screen.hidden{opacity:0;pointer-events:none}
 .tg{font-size:clamp(28px,8vw,60px);font-weight:900;color:#ff6b00;text-shadow:0 0 40px #ff4500,3px 3px 0 #000;margin-bottom:6px;letter-spacing:2px;animation:tp 2.5s ease-in-out infinite}
@@ -23,24 +23,38 @@ body{background:#080810;overflow:hidden;width:100vw;height:100vh;font-family:'Se
 .bs:disabled{opacity:.35;cursor:default}
 canvas#c{display:block;position:fixed;top:0;left:0;z-index:1}
 #bgvid{position:fixed;top:0;left:0;width:100vw;height:100vh;object-fit:cover;z-index:0}
+@media (max-width:800px), (hover:none){body{background:radial-gradient(ellipse at center,#2a1510 0%,#0a0505 70%)}#bgvid{display:none !important}}
 #hud{position:fixed;top:6px;left:10px;display:none;z-index:500}
 .hp{background:rgba(0,0,0,.85);border:1px solid #444;border-radius:7px;padding:3px 10px;color:#ccc;font-size:12px;white-space:nowrap}
 #log{position:fixed;bottom:4px;left:4px;width:260px;max-height:100px;overflow-y:auto;background:rgba(0,0,0,.85);border:1px solid #333;border-radius:7px;padding:5px 7px;z-index:500;display:none;font-size:11px;color:#888;line-height:1.35}
 @media (max-width:800px){#log{display:none!important}}
 #log::-webkit-scrollbar{width:3px}#log::-webkit-scrollbar-thumb{background:#555;border-radius:3px}
+#toast-stack{position:fixed;top:18%;left:50%;transform:translateX(-50%);z-index:700;display:flex;flex-direction:column;gap:10px;pointer-events:none;align-items:center}
+.toast{font-size:clamp(22px,4.5vw,42px);font-weight:900;padding:12px 28px;border-radius:14px;text-align:center;letter-spacing:1px;text-shadow:2px 2px 0 #000,0 0 24px rgba(0,0,0,.9);animation:toastIn .4s ease-out,toastOut .5s ease-in forwards;animation-delay:0s,2.3s;max-width:90vw;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
+.toast-red{color:#ff5544;background:rgba(80,10,10,.65);border:2px solid #ff4444;box-shadow:0 0 40px rgba(255,60,60,.5)}
+.toast-orange{color:#ffb347;background:rgba(80,40,0,.7);border:2px solid #ff8800;box-shadow:0 0 40px rgba(255,140,0,.6);font-size:clamp(18px,3.6vw,32px)}
+.toast-green{color:#88ff88;background:rgba(10,60,10,.6);border:2px solid #44ff44;box-shadow:0 0 40px rgba(60,255,60,.4)}
+.toast-sub{display:block;font-size:.55em;color:#ddd;margin-top:4px;text-shadow:1px 1px 0 #000;font-weight:600;letter-spacing:0}
+@keyframes toastIn{0%{opacity:0;transform:translateY(-20px) scale(.85)}100%{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes toastOut{0%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(.9)}}
 
 /* Counter dialog */
 #ctr-dlg{position:fixed;inset:0;z-index:800;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.7)}
 #ctr-dlg.show{display:flex}
-.cd-box{background:#0e0e1a;border:2px solid #ffd700;border-radius:14px;padding:14px;max-width:95vw;width:92%;text-align:center;box-shadow:0 0 40px rgba(255,215,0,.2);max-height:90vh;overflow-y:auto}
-.cd-box h3{color:#ffd700;font-size:16px;margin-bottom:10px}
-.cd-played{display:flex;flex-direction:column;align-items:center;margin-bottom:12px}
+.cd-box{background:#0e0e1a;border:2px solid #ffd700;border-radius:14px;padding:16px 20px;max-width:95vw;text-align:center;box-shadow:0 0 40px rgba(255,215,0,.2);max-height:90vh;overflow-y:auto}
+.cd-box h3{color:#ffd700;font-size:16px;margin-bottom:14px}
+.cd-row{display:flex;align-items:center;justify-content:center;gap:24px;margin-bottom:14px;flex-wrap:wrap}
+.cd-played{display:flex;flex-direction:column;align-items:center}
 .cd-played canvas{border-radius:6px;border:2px solid #ff4444;box-shadow:0 0 15px rgba(255,68,68,.4)}
-.cd-sep{color:#888;font-size:13px;margin-bottom:8px}
-.cd-opts{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:14px}
-.cd-opts .cd-card{cursor:pointer;border-radius:6px;border:2px solid #444;transition:all .2s;position:relative}
-.cd-opts .cd-card:hover{border-color:#44ff44;transform:translateY(-4px);box-shadow:0 6px 18px rgba(68,255,68,.3)}
-.cd-opts .cd-card canvas{border-radius:4px}
+.cd-played-lbl{color:#ff8844;font-size:12px;font-weight:bold;margin-top:4px}
+.cd-vs{color:#ffd700;font-size:20px;font-weight:bold;align-self:center}
+.cd-opts-wrap{display:flex;flex-direction:column;align-items:center}
+.cd-opts-hdr{color:#88ff88;font-size:12px;margin-bottom:6px;font-weight:bold}
+.cd-opts{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.cd-opts .cd-card{cursor:pointer;border-radius:6px;transition:all .2s;position:relative;display:flex;flex-direction:column;align-items:center;padding:4px}
+.cd-opts .cd-card:hover{transform:translateY(-4px)}
+.cd-opts .cd-card canvas{border-radius:6px;border:2px solid #44ff44;box-shadow:0 0 15px rgba(68,255,68,.3);transition:box-shadow .2s}
+.cd-opts .cd-card:hover canvas{box-shadow:0 6px 24px rgba(68,255,68,.6)}
 .cd-skip{font-size:14px;padding:8px 24px;border-radius:8px;cursor:pointer;border:1px solid #555;background:#1a1a2e;color:#ccc;transition:all .2s}
 .cd-skip:hover{border-color:#ff6b00;color:#ff6b00}
 
@@ -101,8 +115,18 @@ canvas#c{display:block;position:fixed;top:0;left:0;z-index:1}
   <button class="bs" id="btnStart" disabled>⚔️ COMMENCER</button>
 </div>
 <div id="hud"><span class="hp" id="h2" style="font-size:15px;font-weight:bold">Votre Tour</span></div>
+<div id="settings-btn" title="Paramètres" style="position:fixed;top:6px;right:10px;z-index:510;display:none;width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.7);border:2px solid #ffd700;color:#ffd700;font-size:20px;cursor:pointer;align-items:center;justify-content:center;user-select:none;line-height:1;transition:transform .2s" onmouseover="this.style.transform='rotate(25deg)'" onmouseout="this.style.transform='none'">⚙</div>
+<div id="settings-panel" style="position:fixed;top:50px;right:10px;z-index:511;display:none;background:#0e0e1a;border:2px solid #ffd700;border-radius:10px;padding:14px 16px;min-width:240px;box-shadow:0 6px 24px rgba(0,0,0,.6);color:#eee;font-size:13px">
+  <div style="color:#ffd700;font-weight:bold;margin-bottom:10px;font-size:14px">⚙️ Paramètres</div>
+  <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:6px 0">
+    <input type="checkbox" id="opt-toast" checked style="width:16px;height:16px;cursor:pointer"/>
+    <span>Afficher les actions adverses</span>
+  </label>
+  <div style="color:#888;font-size:11px;margin-left:26px;margin-top:-4px;line-height:1.3">Toasts décrivant les cartes jouées par l'adversaire</div>
+</div>
 <div id="log"></div>
-<div id="ctr-dlg"><div class="cd-box"><h3 id="cdTitle"></h3><div class="cd-played" id="cdPlayed"></div><div class="cd-sep">Vos cartes de contre disponibles :</div><div class="cd-opts" id="cdOpts"></div><button class="cd-skip" id="cdSkip">❌ Laisser passer</button></div></div>
+<div id="toast-stack"></div>
+<div id="ctr-dlg"><div class="cd-box"><h3 id="cdTitle"></h3><div class="cd-row"><div class="cd-played" id="cdPlayed"></div><div class="cd-vs">⚔️</div><div class="cd-opts-wrap"><div class="cd-opts-hdr">Vos contres disponibles</div><div class="cd-opts" id="cdOpts"></div></div></div><button class="cd-skip" id="cdSkip">❌ Laisser passer</button></div></div>
 <div id="modal"><div class="mb"><div id="mt"></div><div class="bts" id="mbt"></div></div></div>
 <div id="end"><h1 id="et"></h1><p id="ep"></p><button class="bs" onclick="location.reload()">🔄 REJOUER</button></div>
 <video id="bgvid" autoplay loop muted playsinline><source src="images/background.mp4" type="video/mp4"></video>
@@ -272,6 +296,8 @@ function hostExecuteClientPlay(idx){
   const fx=p?p.x:l.ahX+idx*l.ahSp,fy=p?p.y:l.ahY;
   // Announce to client: card flies from their hand (owner 1 on host = owner 0 client) to action zone
   mpAnim('play',card,{kind:'hand',owner:1,idx},{kind:'action'},{dur:400});
+  // Toast for host: show opponent's (client's) action
+  if(card.desc)showToast(`${MP.oppNick||'Adversaire'} joue : ${card.name}`,'red',card.desc,2800);
   S.aH.splice(idx,1);S.can=false;
   showAct(card,10000);
   addAn(card,fx,fy,l.azX+(l.azW-l.CW)/2,l.azY+(l.azH-l.CH)/2,400,()=>{
@@ -347,14 +373,16 @@ function clientShowCounter(cardData){
   const pp=document.getElementById('cdPlayed');pp.innerHTML='';
   const cv1=document.createElement('canvas');cv1.width=160;cv1.height=224;pp.appendChild(cv1);
   setTimeout(()=>{const cx=cv1.getContext('2d');const sp=ES[card.sprite];if(sp&&iE.complete)cx.drawImage(iE,sp[0],sp[1],sp[2],sp[3],0,0,160,224)},50);
-  const nm=document.createElement('div');nm.style.cssText='color:#ff8844;font-size:14px;font-weight:bold;margin-top:4px';nm.textContent=card.name;pp.appendChild(nm);
+  const nm=document.createElement('div');nm.style.cssText='color:#ff8844;font-size:14px;font-weight:bold;margin-top:6px';nm.textContent=card.name;pp.appendChild(nm);
+  const dsc=document.createElement('div');dsc.style.cssText='color:#ccc;font-size:11px;margin-top:3px;max-width:170px;line-height:1.3';dsc.textContent=card.desc||'';pp.appendChild(dsc);
   const opts=document.getElementById('cdOpts');opts.innerHTML='';
   const cs=S.pH.filter(c=>card.counters&&card.counters.includes(c.id));
   cs.forEach(c=>{
     const wrap=document.createElement('div');wrap.className='cd-card';wrap.style.textAlign='center';wrap.style.cursor='pointer';
-    const cv=document.createElement('canvas');cv.width=120;cv.height=168;cv.style.pointerEvents='none';wrap.appendChild(cv);
-    setTimeout(()=>{const cx=cv.getContext('2d');const sp=ES[c.sprite];if(sp&&iE.complete)cx.drawImage(iE,sp[0],sp[1],sp[2],sp[3],0,0,120,168)},50);
-    const lb=document.createElement('div');lb.style.cssText='color:#88ff88;font-size:11px;margin-top:3px;font-weight:bold;pointer-events:none';lb.textContent=c.name;wrap.appendChild(lb);
+    const cv=document.createElement('canvas');cv.width=160;cv.height=224;cv.style.pointerEvents='none';wrap.appendChild(cv);
+    setTimeout(()=>{const cx=cv.getContext('2d');const sp=ES[c.sprite];if(sp&&iE.complete)cx.drawImage(iE,sp[0],sp[1],sp[2],sp[3],0,0,160,224)},50);
+    const lb=document.createElement('div');lb.style.cssText='color:#88ff88;font-size:13px;margin-top:6px;font-weight:bold;pointer-events:none';lb.textContent=c.name;wrap.appendChild(lb);
+    const cd=document.createElement('div');cd.style.cssText='color:#aaa;font-size:11px;margin-top:3px;max-width:170px;line-height:1.3;pointer-events:none';cd.textContent=c.desc||'';wrap.appendChild(cd);
     wrap.onclick=()=>{
       // Find card by id (not reference) because snapshots may have replaced objects
       const idx=S.pH.findIndex(x=>x.id===c.id);
@@ -366,7 +394,6 @@ function clientShowCounter(cardData){
         return;
       }
       dlg.classList.remove('show');S.ctrPend=false;
-      // Send both idx AND cardId so host can verify
       mpSend('counterChoice',{choice:{type:'use',idx,cardId:c.id}});
     };
     opts.appendChild(wrap);
@@ -509,6 +536,11 @@ function mpOnMessage(msg){
     if(!MP.isHost)playRemoteAnim(data);
   } else if(type==='counterPrompt'){
     if(!MP.isHost)clientShowCounter(data.card);
+  } else if(type==='toast'){
+    if(!MP.isHost){
+      const d=data.delay||0;
+      setTimeout(()=>showToast(data.msg,data.variant||'red',data.sub||null,data.dur||2600),d);
+    }
   } else if(type==='log'){
     if(!MP.isHost)log(data.msg);
   } else if(type==='playCard'||type==='discard'||type==='pass'||type==='counterChoice'){
@@ -554,11 +586,24 @@ function playRemoteAnim(data){
     if(kind==='play'){
       playActSfx();
       // Card lingers in action zone
-      if(toTgt.kind==='action'){S.actCard=card;S.actTmr=2500}
+      if(toTgt.kind==='action'){
+        S.actCard=card;S.actTmr=2500;
+        // Only show toast if it's the opponent playing (host's pH = client's aH = fromSrc.owner===0 on host = client's opponent)
+        // On client, fromSrc.owner===0 means "host's hand" which is client's opponent
+        if(fromSrc&&fromSrc.kind==='hand'&&fromSrc.owner===0&&card&&card.desc){
+          showToast(`${MP.oppNick||'Adversaire'} joue : ${card.name}`,'red',card.desc,2800);
+        }
+      }
     }
     else if(kind==='counter'){
       playCtrSfx();spP(to.x+to.w/2,to.y+to.h/2,'#ff4444',12);
       if(toTgt.kind==='effect'){S.effCard=card;S.effTmr=2500}
+      // Toast: show which counter card was played by opponent
+      // fromSrc.owner===1 on host = owner 0 on client = client's hand = myself
+      // fromSrc.owner===0 on host = owner 1 on client = opponent
+      if(fromSrc&&fromSrc.kind==='hand'&&fromSrc.owner===0&&card&&card.desc){
+        showToast(`🛡️ ${MP.oppNick||'Adversaire'} contre avec : ${card.name}`,'green',card.desc,2600);
+      }
     }
     else if(kind==='eat')spP(to.x+to.w/2,to.y+to.h/2,'#ff0000',15);
     else if(kind==='sendTable')spP(to.x+to.w/2,to.y+to.h/2,'#ff6b00',10);
@@ -593,6 +638,7 @@ function startMpGame(){
   MP.enabled=true;
   document.getElementById('title-screen').classList.add('hidden');
   document.getElementById('hud').style.display='flex';
+  document.getElementById('settings-btn').style.display='flex';
   if(!getL().mob)document.getElementById('log').style.display='block';
   
   if(MP.isHost){
@@ -622,7 +668,22 @@ function startMpGame(){
 }
 </script>
 <script>
+// User settings (persisted in localStorage)
+const UI_SETTINGS={
+  toastsEnabled: (typeof localStorage!=='undefined' && localStorage.getItem('sc_toasts')==='0') ? false : true
+};
+// Mobile detection done ONCE at load (not per-frame)
+const IS_MOBILE=(typeof window!=='undefined')&&(('ontouchstart' in window)||window.innerWidth<800||/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent||''));
+// Target DPR capped for mobile so we don't render too many pixels
+const DPR_CAP=IS_MOBILE?1.25:2;
 const B='images/',C=document.getElementById('c'),X=C.getContext('2d');
+// Pause bg video on mobile (it's already hidden via CSS, but pausing saves CPU/battery)
+if(IS_MOBILE){
+  setTimeout(()=>{
+    const v=document.getElementById('bgvid');
+    if(v){try{v.pause();v.removeAttribute('autoplay');v.src='';v.load()}catch(e){}}
+  },0);
+}
 const iR=new Image(),iE=new Image(),iT=new Image(),iB=new Image();
 const sfxAction=new Audio('son/action.mp3');
 const sfxContre=new Audio('son/contre.mp3');
@@ -703,26 +764,31 @@ function spP(x,y,c,n=12){for(let i=0;i<n;i++)S.parts.push({x,y,vx:(Math.random()
 function addAn(card,fx,fy,tx,ty,dur,cb,o={}){S.anims.push({card,fx,fy,tx,ty,p:0,dur:dur||400,cb,back:o.back,fw:o.fw||0,fh:o.fh||0,tw:o.tw||0,th:o.th||0})}
 function easeOut(t){return 1-Math.pow(1-t,3)}
 
-// DPR-aware resize
+// DPR-aware resize (cap DPR on mobile for perf)
 function resize(){
-  const dpr=devicePixelRatio||1;
+  const dpr=Math.min(devicePixelRatio||1, DPR_CAP);
   S.W=innerWidth;S.H=innerHeight;
   C.width=S.W*dpr;C.height=S.H*dpr;
   C.style.width=S.W+'px';C.style.height=S.H+'px';
   X.setTransform(dpr,0,0,dpr,0,0);
-  X.imageSmoothingEnabled=true;X.imageSmoothingQuality='high';
+  X.imageSmoothingEnabled=true;
+  X.imageSmoothingQuality=IS_MOBILE?'low':'high';
+  S._l=null; // invalidate layout cache
 }
 addEventListener('resize',resize);
-let _dpr=devicePixelRatio||1;
-setInterval(()=>{const d=devicePixelRatio||1;if(d!==_dpr){_dpr=d;resize()}},150);
+let _dpr=Math.min(devicePixelRatio||1, DPR_CAP);
+setInterval(()=>{const d=Math.min(devicePixelRatio||1, DPR_CAP);if(d!==_dpr){_dpr=d;resize()}},500);
 resize();
 
 const RAT=360/520;
 
 function getL(){
+  // Cache layout per frame to avoid recomputing on every call
+  if(S._l && S._lW===S.W && S._lH===S.H && S._lPH===S.pH.length && S._lAH===S.aH.length && S._lAC===S.aC.length && S._lPC===S.pC.length && S._lTbl===S.tbl.length) return S._l;
+  S._lW=S.W;S._lH=S.H;S._lPH=S.pH.length;S._lAH=S.aH.length;S._lAC=S.aC.length;S._lPC=S.pC.length;S._lTbl=S.tbl.length;
   const W=S.W,H=S.H;
-  const mob=W<800||('ontouchstart' in window); // Mobile detection
-  const port=H>W; // Portrait mode
+  const mob=IS_MOBILE;
+  const port=H>W;
 
   // Card sizes adapt to screen
   let CH,CW,SH,SW,TH,TW;
@@ -783,8 +849,10 @@ function getL(){
   // Button
   const bpX=W/2-100,bpY=pcY+SH+gap;
 
-  return{CW,CH,SW,SH,TW,TH,mob,acX,acY,acSp,ahX,ahY,ahSp,azX,azY,azW,azH,ezX,ezY,ezW,ezH,tX,tY,tW,tH,tcX,tSp,tcY,plateX,plateY,dpX,dpY,dpW,dpH,ddX,ddY,ddW,ddH,phX,phY,phSp,pcX,pcY,pcSp,bpX,bpY};
+  return S._l={CW,CH,SW,SH,TW,TH,mob,acX,acY,acSp,ahX,ahY,ahSp,azX,azY,azW,azH,ezX,ezY,ezW,ezH,tX,tY,tW,tH,tcX,tSp,tcY,plateX,plateY,dpX,dpY,dpW,dpH,ddX,ddY,ddW,ddH,phX,phY,phSp,pcX,pcY,pcSp,bpX,bpY};
 }
+// Invalidate cache when dimensions or counts change
+function invalL(){S._l=null}
 
 // Check if a card can be played given current game state
 function canPlay(card){
@@ -817,11 +885,18 @@ function rr(x,y,w,h,r){X.beginPath();X.moveTo(x+r,y);X.lineTo(x+w-r,y);X.quadrat
 
 function drawCard(x,y,w,h,card,o={}){
   X.save();
-  if(o.grey){X.shadowColor='rgba(0,0,0,.5)';X.shadowBlur=4}
-  else if(o.sel){X.shadowColor='rgba(255,215,0,.8)';X.shadowBlur=22}
-  else if(o.hov){X.shadowColor='rgba(255,170,50,.6)';X.shadowBlur=16}
-  else{X.shadowColor='rgba(0,0,0,.8)';X.shadowBlur=8}
-  X.shadowOffsetY=2;
+  // Shadows are very expensive on mobile - only draw them on desktop or for selected/hovered cards
+  if(!IS_MOBILE){
+    if(o.grey){X.shadowColor='rgba(0,0,0,.5)';X.shadowBlur=4}
+    else if(o.sel){X.shadowColor='rgba(255,215,0,.8)';X.shadowBlur=22}
+    else if(o.hov){X.shadowColor='rgba(255,170,50,.6)';X.shadowBlur=16}
+    else{X.shadowColor='rgba(0,0,0,.8)';X.shadowBlur=8}
+    X.shadowOffsetY=2;
+  } else {
+    // On mobile, only show a light shadow for selected/hovered cards
+    if(o.sel){X.shadowColor='rgba(255,215,0,.9)';X.shadowBlur=8;X.shadowOffsetY=1}
+    else if(o.hov){X.shadowColor='rgba(255,170,50,.7)';X.shadowBlur=6;X.shadowOffsetY=1}
+  }
   X.beginPath();rr(x,y,w,h,6);X.clip();
   if(o.back){
     if(iB.complete)X.drawImage(iB,0,0,iB.naturalWidth,iB.naturalHeight,x,y,w,h);
@@ -873,11 +948,12 @@ function updateHandPos(){
 // Main draw
 function draw(){
   const W=S.W,H=S.H;
-  // Clear canvas (transparent to show video background)
   X.clearRect(0,0,W,H);
-  // Semi-transparent dark overlay for readability
-  X.fillStyle='rgba(5,5,15,.45)';
-  X.fillRect(0,0,W,H);
+  if(!IS_MOBILE){
+    // Desktop: dark overlay for readability over the video bg
+    X.fillStyle='rgba(5,5,15,.45)';
+    X.fillRect(0,0,W,H);
+  }
   if(S.phase!=='play'){drawPt();return}
   const l=getL();
   updateHandPos();
@@ -885,7 +961,7 @@ function draw(){
   // AI creatures (VISIBLE - face up)
   X.font='10px sans-serif';X.fillStyle='rgba(255,100,100,.5)';X.textAlign='center';X.textBaseline='bottom';
   X.fillText(`Créatures adverses (${S.aC.length})`,W/2,l.acY-1);
-  S.aC.forEach((c,i)=>drawCard(l.acX+i*l.acSp,l.acY,l.TW,l.TH,c));
+  for(let i=0;i<S.aC.length;i++){drawCard(l.acX+i*l.acSp,l.acY,l.TW,l.TH,S.aC[i])}
 
   // AI hand (face down, animated positions)
   X.fillStyle='rgba(200,150,60,.35)';X.fillText(`Main adverse (${S.aH.length})`,W/2,l.ahY-1);
@@ -925,11 +1001,14 @@ function draw(){
   X.restore();
   rr(l.tX,l.tY,l.tW,l.tH,10);
   if(S.gueuleton){
-    X.strokeStyle=`rgba(255,${40+Math.sin(S.oA*3)*30|0},0,.8)`;X.lineWidth=3;X.stroke();
-    // Outer glow
-    X.save();X.globalAlpha=.15+Math.sin(S.oA*2)*.1;
-    rr(l.tX-3,l.tY-3,l.tW+6,l.tH+6,12);X.strokeStyle='#ff2200';X.lineWidth=4;X.stroke();
-    X.restore();
+    if(IS_MOBILE){
+      X.strokeStyle='#ff3300';X.lineWidth=3;X.stroke();
+    } else {
+      X.strokeStyle=`rgba(255,${40+Math.sin(S.oA*3)*30|0},0,.8)`;X.lineWidth=3;X.stroke();
+      X.save();X.globalAlpha=.15+Math.sin(S.oA*2)*.1;
+      rr(l.tX-3,l.tY-3,l.tW+6,l.tH+6,12);X.strokeStyle='#ff2200';X.lineWidth=4;X.stroke();
+      X.restore();
+    }
   } else {
     X.strokeStyle='rgba(139,105,20,.4)';X.lineWidth=1.5;X.stroke();
   }
@@ -966,18 +1045,18 @@ function draw(){
     X.restore();
   }
 
-  S.tbl.forEach((e,i)=>{
-    if(e._fly)return;
+  for(let i=0;i<S.tbl.length;i++){
+    const e=S.tbl[i];
+    if(e._fly)continue;
     const targetX=l.tcX+i*l.tSp;
     if(e._x===undefined)e._x=targetX;
-    // Lerp smoothly, but snap when very close to avoid micro-jitter
     const diff=targetX-e._x;
     if(Math.abs(diff)<0.5)e._x=targetX;
     else e._x=lerp(e._x,targetX,.18);
     drawCard(e._x,l.tcY,l.SW,l.SH,e.card,{hov:S.hovT===i});
     X.fillStyle=e.owner===0?'#4caf50':'#f44336';X.beginPath();X.arc(e._x+l.SW-4,l.tcY+4,3.5,0,Math.PI*2);X.fill();
     X.strokeStyle='#000';X.lineWidth=.8;X.stroke();
-  });
+  }
 
   // Discard pile (left of table)
   rr(l.ddX,l.ddY,l.ddW,l.ddH,6);
@@ -1006,47 +1085,81 @@ function draw(){
 
   // Player hand (animated positions)
   const myTurn=S.cur===0&&S.can;
-  S.pH.forEach((card,i)=>{
-    const p=S.pPos[i];if(!p)return;
+  for(let i=0;i<S.pH.length;i++){
+    const card=S.pH[i],p=S.pPos[i];if(!p)continue;
     const hov=S.hovH===i;
-    // In discard mode: all cards are clickable (highlighted), not greyed
     const grey=S.discardMode?false:(!myTurn||!canPlay(card));
     const discardHov=S.discardMode&&hov;
     drawCard(p.x,p.y+p.ly,l.CW,l.CH,card,{hov:discardHov||(hov&&!grey),grey});
-  });
+  }
 
-  // Large card preview on hover (not on mobile - too intrusive)
-  if(!l.mob&&(myTurn||S.discardMode)&&S.hovH>=0&&S.hovH<S.pH.length){
+  // Card preview - desktop: floating above hand; mobile: fixed bar at top of hand area
+  if((myTurn||S.discardMode)&&S.hovH>=0&&S.hovH<S.pH.length){
     const card=S.pH[S.hovH],p=S.pPos[S.hovH];
     if(p){
-      const pvW=l.CW*1.8|0, pvH=l.CH*1.8|0;
-      const pvX=Math.max(4,Math.min(p.x+l.CW/2-pvW/2, W-pvW-4));
-      const pvY=Math.max(4, p.y+p.ly-pvH-12);
-      X.save();
-      X.fillStyle='rgba(0,0,0,.7)';
-      rr(pvX-6,pvY-6,pvW+12,pvH+(S.discardMode?50:38),10);X.fill();
-      X.strokeStyle=S.discardMode?'rgba(255,100,100,.6)':'rgba(255,200,100,.5)';X.lineWidth=2;
-      rr(pvX-6,pvY-6,pvW+12,pvH+(S.discardMode?50:38),10);X.stroke();
-      X.restore();
-      // Draw big card
-      const grey=!canPlay(card);
-      drawCard(pvX,pvY,pvW,pvH,card,{grey});
-      // Name + desc below
-      X.save();
-      X.font='bold 13px sans-serif';X.fillStyle=grey?'#888':'#ffaa44';X.textAlign='center';X.textBaseline='top';
-      X.fillText(card.name,pvX+pvW/2,pvY+pvH+4);
-      X.font='11px sans-serif';X.fillStyle='#ccc';
-      X.fillText(card.desc||'',pvX+pvW/2,pvY+pvH+20);
-      if(S.discardMode){X.font='bold 12px sans-serif';X.fillStyle='#ff8844';X.fillText('🗑️ Cliquez pour défausser cette carte',pvX+pvW/2,pvY+pvH+34)}
-      else if(grey){X.font='bold 12px sans-serif';X.fillStyle='#ff6666';X.fillText('⛔ Non jouable actuellement',pvX+pvW/2,pvY+pvH+34)}
-      X.restore();
+      if(l.mob){
+        // Mobile: banner above hand with name + desc + CTA button
+        const grey=!canPlay(card);
+        const bnH=72;
+        const bnY=Math.max(4, p.y+p.ly-bnH-6);
+        const bnW=Math.min(W-16, 360);
+        const bnX=(W-bnW)/2;
+        X.save();
+        X.fillStyle='rgba(0,0,0,.88)';
+        rr(bnX,bnY,bnW,bnH,10);X.fill();
+        X.strokeStyle=S.discardMode?'#ff6666':(grey?'#666':'#ffaa44');X.lineWidth=2;
+        rr(bnX,bnY,bnW,bnH,10);X.stroke();
+        X.restore();
+        X.textAlign='left';X.textBaseline='top';
+        X.font='bold 15px sans-serif';X.fillStyle=grey?'#888':'#ffaa44';
+        X.fillText(card.name,bnX+10,bnY+7);
+        X.font='12px sans-serif';X.fillStyle='#ddd';
+        // Wrap desc text if needed
+        const desc=card.desc||'';
+        const maxW=bnW-20;
+        const words=desc.split(' ');
+        let line='',ly=bnY+28;
+        for(let wi=0;wi<words.length;wi++){
+          const tt=line+(line?' ':'')+words[wi];
+          if(X.measureText(tt).width>maxW&&line){
+            X.fillText(line,bnX+10,ly);line=words[wi];ly+=15;
+          } else line=tt;
+        }
+        X.fillText(line,bnX+10,ly);
+        // CTA hint at bottom
+        X.font='bold 11px sans-serif';X.textAlign='right';
+        if(S.discardMode){X.fillStyle='#ff8844';X.fillText('👉 Retaper pour défausser',bnX+bnW-10,bnY+bnH-16)}
+        else if(grey){X.fillStyle='#ff6666';X.fillText('⛔ Non jouable',bnX+bnW-10,bnY+bnH-16)}
+        else{X.fillStyle='#44ff88';X.fillText('👉 Retaper pour jouer',bnX+bnW-10,bnY+bnH-16)}
+      } else {
+        // Desktop: floating preview
+        const pvW=l.CW*1.8|0, pvH=l.CH*1.8|0;
+        const pvX=Math.max(4,Math.min(p.x+l.CW/2-pvW/2, W-pvW-4));
+        const pvY=Math.max(4, p.y+p.ly-pvH-12);
+        X.save();
+        X.fillStyle='rgba(0,0,0,.7)';
+        rr(pvX-6,pvY-6,pvW+12,pvH+(S.discardMode?50:38),10);X.fill();
+        X.strokeStyle=S.discardMode?'rgba(255,100,100,.6)':'rgba(255,200,100,.5)';X.lineWidth=2;
+        rr(pvX-6,pvY-6,pvW+12,pvH+(S.discardMode?50:38),10);X.stroke();
+        X.restore();
+        const grey=!canPlay(card);
+        drawCard(pvX,pvY,pvW,pvH,card,{grey});
+        X.save();
+        X.font='bold 13px sans-serif';X.fillStyle=grey?'#888':'#ffaa44';X.textAlign='center';X.textBaseline='top';
+        X.fillText(card.name,pvX+pvW/2,pvY+pvH+4);
+        X.font='11px sans-serif';X.fillStyle='#ccc';
+        X.fillText(card.desc||'',pvX+pvW/2,pvY+pvH+20);
+        if(S.discardMode){X.font='bold 12px sans-serif';X.fillStyle='#ff8844';X.fillText('🗑️ Cliquez pour défausser cette carte',pvX+pvW/2,pvY+pvH+34)}
+        else if(grey){X.font='bold 12px sans-serif';X.fillStyle='#ff6666';X.fillText('⛔ Non jouable actuellement',pvX+pvW/2,pvY+pvH+34)}
+        X.restore();
+      }
     }
   }
 
   // Player creatures
   X.font='10px sans-serif';X.fillStyle='rgba(100,200,100,.45)';X.textAlign='center';X.textBaseline='bottom';
   X.fillText(`Vos Créatures (${S.pC.length})`,W/2,l.pcY-1);
-  S.pC.forEach((c,i)=>drawCard(l.pcX+i*l.pcSp,l.pcY,l.SW,l.SH,c));
+  for(let i=0;i<S.pC.length;i++){drawCard(l.pcX+i*l.pcSp,l.pcY,l.SW,l.SH,S.pC[i])}
 
   // Buttons below creatures: only Passer (1 action per turn = play a card OR pass)
   if(S.cur===0&&S.can&&!S.ctrPend){
@@ -1137,6 +1250,29 @@ requestAnimationFrame(loop);
   };
 })();
 
+// Settings panel wiring
+(function(){
+  const btn=document.getElementById('settings-btn');
+  const pan=document.getElementById('settings-panel');
+  const chk=document.getElementById('opt-toast');
+  if(!btn||!pan||!chk)return;
+  chk.checked=UI_SETTINGS.toastsEnabled;
+  btn.onclick=(e)=>{
+    e.stopPropagation();
+    pan.style.display=(pan.style.display==='block')?'none':'block';
+  };
+  chk.onchange=()=>{
+    UI_SETTINGS.toastsEnabled=chk.checked;
+    try{localStorage.setItem('sc_toasts',chk.checked?'1':'0')}catch(e){}
+  };
+  // Close panel when clicking outside
+  document.addEventListener('click',(e)=>{
+    if(pan.style.display==='block'&&e.target!==btn&&!pan.contains(e.target)){
+      pan.style.display='none';
+    }
+  });
+})();
+
 function startGame(){
   if(!S.pRace)return;
   // Go fullscreen
@@ -1157,6 +1293,7 @@ function startGame(){
 
   document.getElementById('title-screen').classList.add('hidden');
   document.getElementById('hud').style.display='flex';
+  document.getElementById('settings-btn').style.display='flex';
   if(!getL().mob)document.getElementById('log').style.display='block';
   const ot=RACES.filter(r=>r.id!==S.pRace);
   S.aRace=ot[0|Math.random()*ot.length].id;
@@ -1187,6 +1324,21 @@ function uHUD(){
 
 function showAct(c,d=2500){S.actCard=c;S.actTmr=d}
 function showEff(c,d=2000){S.effCard=c;S.effTmr=d}
+
+// Toast system: show important messages overlaid on the game
+function showToast(msg,variant='red',sub=null,dur=2800){
+  if(!UI_SETTINGS.toastsEnabled)return;
+  const stack=document.getElementById('toast-stack');
+  if(!stack)return;
+  const t=document.createElement('div');
+  t.className='toast toast-'+variant;
+  t.textContent=msg;
+  if(sub){
+    const s=document.createElement('span');s.className='toast-sub';s.textContent=sub;t.appendChild(s);
+  }
+  stack.appendChild(t);
+  setTimeout(()=>{if(t.parentNode)t.parentNode.removeChild(t)},dur);
+}
 function playActSfx(){sfxAction.currentTime=0;sfxAction.play().catch(()=>{})}
 function playCtrSfx(){sfxContre.currentTime=0;sfxContre.play().catch(()=>{})}
 function canCtr(c){
@@ -1208,16 +1360,17 @@ function showCtrUI(aiCard){
     if(sp&&iE.complete)cx.drawImage(iE,sp[0],sp[1],sp[2],sp[3],0,0,160,224);
   },50);
   // Card name under preview
-  const nm=document.createElement('div');nm.style.cssText='color:#ff8844;font-size:14px;font-weight:bold;margin-top:4px';nm.textContent=aiCard.name;pp.appendChild(nm);
-  const ds=document.createElement('div');ds.style.cssText='color:#aaa;font-size:12px;margin-bottom:6px';ds.textContent=aiCard.desc;pp.appendChild(ds);
+  const nm=document.createElement('div');nm.style.cssText='color:#ff8844;font-size:14px;font-weight:bold;margin-top:6px';nm.textContent=aiCard.name;pp.appendChild(nm);
+  const ds=document.createElement('div');ds.style.cssText='color:#ccc;font-size:11px;margin-top:3px;max-width:170px;line-height:1.3';ds.textContent=aiCard.desc||'';pp.appendChild(ds);
   // Counter options
   const opts=document.getElementById('cdOpts');opts.innerHTML='';
   const cs=S.pH.filter(c=>aiCard.counters.includes(c.id));
   cs.forEach(c=>{
     const wrap=document.createElement('div');wrap.className='cd-card';wrap.style.textAlign='center';wrap.style.cursor='pointer';
-    const cv=document.createElement('canvas');cv.width=120;cv.height=168;cv.style.pointerEvents='none';wrap.appendChild(cv);
-    setTimeout(()=>{const cx=cv.getContext('2d');const sp=ES[c.sprite];if(sp&&iE.complete)cx.drawImage(iE,sp[0],sp[1],sp[2],sp[3],0,0,120,168)},50);
-    const lb=document.createElement('div');lb.style.cssText='color:#88ff88;font-size:11px;margin-top:3px;font-weight:bold;pointer-events:none';lb.textContent=c.name;wrap.appendChild(lb);
+    const cv=document.createElement('canvas');cv.width=160;cv.height=224;cv.style.pointerEvents='none';wrap.appendChild(cv);
+    setTimeout(()=>{const cx=cv.getContext('2d');const sp=ES[c.sprite];if(sp&&iE.complete)cx.drawImage(iE,sp[0],sp[1],sp[2],sp[3],0,0,160,224)},50);
+    const lb=document.createElement('div');lb.style.cssText='color:#88ff88;font-size:13px;margin-top:6px;font-weight:bold;pointer-events:none';lb.textContent=c.name;wrap.appendChild(lb);
+    const cd=document.createElement('div');cd.style.cssText='color:#aaa;font-size:11px;margin-top:3px;max-width:170px;line-height:1.3;pointer-events:none';cd.textContent=c.desc||'';wrap.appendChild(cd);
     wrap.onclick=()=>{
       dlg.classList.remove('show');S.ctrPend=false;
       const idx=S.pH.indexOf(c);
@@ -1282,43 +1435,47 @@ C.addEventListener('click',e=>{
 function getTouchPos(e){const t=e.touches[0]||e.changedTouches[0];return{x:t.clientX,y:t.clientY}}
 C.addEventListener('touchstart',e=>{
   e.preventDefault();
-  const{x:mx,y:my}=getTouchPos(e);
-  // Simulate hover for the touched card
-  if(S.phase==='play'&&S.cur===0){
-    const l=getL();
-    S.hovH=-1;
-    for(let i=S.pH.length-1;i>=0;i--){
-      const p=S.pPos[i];if(!p)continue;
-      if(mx>=p.x&&mx<=p.x+l.CW&&my>=p.y+p.ly-10&&my<=p.y+p.ly+l.CH+10){S.hovH=i;break}
-    }
-  }
 },{passive:false});
 
 C.addEventListener('touchend',e=>{
   e.preventDefault();
   const{x:mx,y:my}=getTouchPos(e);
-  // Simulate click
   if(S.phase!=='play'||S.cur!==0||S.ctrPend)return;
   const l=getL();
 
+  // Find which card was tapped
+  let tappedIdx=-1;
+  for(let i=S.pH.length-1;i>=0;i--){
+    const p=S.pPos[i];if(!p)continue;
+    if(mx>=p.x&&mx<=p.x+l.CW&&my>=p.y+p.ly-10&&my<=p.y+p.ly+l.CH+10){tappedIdx=i;break}
+  }
+
   if(S.discardMode){
-    for(let i=S.pH.length-1;i>=0;i--){
-      const p=S.pPos[i];if(!p)continue;
-      if(mx>=p.x&&mx<=p.x+l.CW&&my>=p.y+p.ly-10&&my<=p.y+p.ly+l.CH+10){
-        S.hovH=-1;playerDiscard(i);return;
-      }
-    }
+    if(tappedIdx>=0){S.hovH=-1;playerDiscard(tappedIdx);return}
     return;
   }
   if(!S.can)return;
-  for(let i=S.pH.length-1;i>=0;i--){
-    const p=S.pPos[i];if(!p)continue;
-    if(mx>=p.x&&mx<=p.x+l.CW&&my>=p.y+p.ly-10&&my<=p.y+p.ly+l.CH+10){
-      if(!canPlay(S.pH[i]))return;
-      S.hovH=-1;playCard(i);return;
+
+  // Check Pass button (tap once, no preview needed)
+  if(mx>=l.bpX&&mx<=l.bpX+200&&my>=l.bpY&&my<=l.bpY+40){pass();return}
+
+  if(tappedIdx>=0){
+    const card=S.pH[tappedIdx];
+    if(!canPlay(card)){
+      // Not playable - just show preview (toggle)
+      S.hovH=(S.hovH===tappedIdx)?-1:tappedIdx;
+      return;
     }
+    // Playable: first tap = preview (hovH), second tap same card = play
+    if(S.hovH===tappedIdx){
+      S.hovH=-1;
+      playCard(tappedIdx);
+    } else {
+      S.hovH=tappedIdx;
+    }
+    return;
   }
-  if(mx>=l.bpX&&mx<=l.bpX+200&&my>=l.bpY&&my<=l.bpY+34){pass();return}
+  // Tap outside cards: clear preview
   S.hovH=-1;
 },{passive:false});
 
@@ -1406,6 +1563,17 @@ function playCard(idx){
 function execCard(card,ow){
   log(`${ow===0?'⚔️':'🤖'} ${ow===0?'Vous':'Adv.'}: ${card.name}`);
 
+  // Toast: show opponent's action description
+  // Solo mode: AI plays (ow===1, not in MP)
+  // MP mode: toast is triggered in playRemoteAnim on client side, so skip here for MP
+  if(ow===1&&!MP.enabled&&card.desc){
+    showToast(`Adversaire joue : ${card.name}`,'red',card.desc,2800);
+  }
+  // MP host's own play: no toast (they're playing themselves)
+  // MP host sees client card via hostExecuteClientPlay (handled below)
+
+  // Track gueuleton state to detect activation
+  const wasGueuleton=S.gueuleton;
   // In MP mode: host asks client to counter its cards (ow=0 = host played)
   if(MP.enabled&&MP.isHost&&ow===0&&card.counters&&card.counters.length>0){
     // Check if client has any counter card
@@ -1443,6 +1611,7 @@ function execCard(card,ow){
         playCtrSfx();
         spP(toX+l.CW/2,toY+l.CH/2,'#ff4444',18);
         log(`🛡️ Adversaire contre avec ${aiCounter.name} !`);
+        if(aiCounter.desc)showToast(`🛡️ Adversaire contre avec : ${aiCounter.name}`,'green',aiCounter.desc,2600);
         if(aiCounter.id==='surprise_chef'&&S.pC.length){
           const ci2=pickCreature(S.pC);
           const c=S.pC.splice(ci2,1)[0];
@@ -1461,7 +1630,7 @@ function execCard(card,ow){
 function continueExecCard(card,ow){
   const enemy=ow===0?S.aC:S.pC;
   const eOwn=ow===0?1:0;
-
+  const wasGueuleton=S.gueuleton;
   switch(card.id){
     // À Table variants: send 1 enemy to table (RIGHT side = push)
     case'a_table_1':case'a_table_2':case'a_table_3':
@@ -1595,6 +1764,23 @@ function continueExecCard(card,ow){
   }
   // Check gueuleton trigger
   chkGueuleton();
+  // Toast: Gueuleton activation announcement
+  if(!wasGueuleton&&S.gueuleton){
+    let activator;
+    if(!MP.enabled) activator = (ow===0)?'Vous':'Adversaire';
+    else if(MP.isHost) activator = (ow===0)?MP.myNick:MP.oppNick;
+    else activator = (ow===0)?MP.myNick:MP.oppNick;
+    const toastMsg=`🔥 ${activator} a activé le Gueuleton !`;
+    setTimeout(()=>{
+      showToast(toastMsg,'orange',null,2600);
+    },1600);
+    // Broadcast to client in MP
+    if(MP.enabled&&MP.isHost){
+      // From client's perspective, owner is inverted
+      const clientActivator=(ow===0)?MP.myNick:MP.oppNick; // Same nick from client's view
+      mpSend('toast',{msg:`🔥 ${clientActivator} a activé le Gueuleton !`,variant:'orange',delay:1600,dur:2600});
+    }
+  }
   spP(S.W/2,S.H*.4,'#ff6b00',12);uHUD();chkEnd();
 }
 
