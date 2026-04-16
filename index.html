@@ -116,13 +116,20 @@ canvas#c{display:block;position:fixed;top:0;left:0;z-index:1}
 </div>
 <div id="hud"><span class="hp" id="h2" style="font-size:15px;font-weight:bold">Votre Tour</span></div>
 <div id="settings-btn" title="Paramètres" style="position:fixed;top:6px;right:10px;z-index:510;display:none;width:38px;height:38px;border-radius:50%;background:rgba(0,0,0,.7);border:2px solid #ffd700;color:#ffd700;font-size:20px;cursor:pointer;align-items:center;justify-content:center;user-select:none;line-height:1;transition:transform .2s" onmouseover="this.style.transform='rotate(25deg)'" onmouseout="this.style.transform='none'">⚙</div>
-<div id="settings-panel" style="position:fixed;top:50px;right:10px;z-index:511;display:none;background:#0e0e1a;border:2px solid #ffd700;border-radius:10px;padding:14px 16px;min-width:240px;box-shadow:0 6px 24px rgba(0,0,0,.6);color:#eee;font-size:13px">
+<div id="settings-panel" style="position:fixed;top:50px;right:10px;z-index:511;display:none;background:#0e0e1a;border:2px solid #ffd700;border-radius:10px;padding:14px 16px;min-width:260px;box-shadow:0 6px 24px rgba(0,0,0,.6);color:#eee;font-size:13px">
   <div style="color:#ffd700;font-weight:bold;margin-bottom:10px;font-size:14px">⚙️ Paramètres</div>
   <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:6px 0">
     <input type="checkbox" id="opt-toast" checked style="width:16px;height:16px;cursor:pointer"/>
     <span>Afficher les actions adverses</span>
   </label>
   <div style="color:#888;font-size:11px;margin-left:26px;margin-top:-4px;line-height:1.3">Toasts décrivant les cartes jouées par l'adversaire</div>
+  <div id="opt-expert-wrap" style="display:none;border-top:1px solid #333;margin-top:10px;padding-top:10px">
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:6px 0">
+      <input type="checkbox" id="opt-expert" style="width:16px;height:16px;cursor:pointer"/>
+      <span>Mode expert (tap unique)</span>
+    </label>
+    <div style="color:#888;font-size:11px;margin-left:26px;margin-top:-4px;line-height:1.3">Joue la carte au premier tap, sans aperçu</div>
+  </div>
 </div>
 <div id="log"></div>
 <div id="toast-stack"></div>
@@ -670,7 +677,8 @@ function startMpGame(){
 <script>
 // User settings (persisted in localStorage)
 const UI_SETTINGS={
-  toastsEnabled: (typeof localStorage!=='undefined' && localStorage.getItem('sc_toasts')==='0') ? false : true
+  toastsEnabled: (typeof localStorage!=='undefined' && localStorage.getItem('sc_toasts')==='0') ? false : true,
+  expertMode: (typeof localStorage!=='undefined' && localStorage.getItem('sc_expert')==='1') ? true : false
 };
 // Mobile detection done ONCE at load (not per-frame)
 const IS_MOBILE=(typeof window!=='undefined')&&(('ontouchstart' in window)||window.innerWidth<800||/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent||''));
@@ -1255,8 +1263,21 @@ requestAnimationFrame(loop);
   const btn=document.getElementById('settings-btn');
   const pan=document.getElementById('settings-panel');
   const chk=document.getElementById('opt-toast');
+  const chkExp=document.getElementById('opt-expert');
+  const expWrap=document.getElementById('opt-expert-wrap');
   if(!btn||!pan||!chk)return;
   chk.checked=UI_SETTINGS.toastsEnabled;
+  // Show expert mode option only on mobile (it's useless on desktop)
+  if(IS_MOBILE&&expWrap){
+    expWrap.style.display='block';
+    if(chkExp){
+      chkExp.checked=UI_SETTINGS.expertMode;
+      chkExp.onchange=()=>{
+        UI_SETTINGS.expertMode=chkExp.checked;
+        try{localStorage.setItem('sc_expert',chkExp.checked?'1':'0')}catch(e){}
+      };
+    }
+  }
   btn.onclick=(e)=>{
     e.stopPropagation();
     pan.style.display=(pan.style.display==='block')?'none':'block';
@@ -1462,11 +1483,17 @@ C.addEventListener('touchend',e=>{
   if(tappedIdx>=0){
     const card=S.pH[tappedIdx];
     if(!canPlay(card)){
-      // Not playable - just show preview (toggle)
+      // Not playable - toggle preview
       S.hovH=(S.hovH===tappedIdx)?-1:tappedIdx;
       return;
     }
-    // Playable: first tap = preview (hovH), second tap same card = play
+    // Expert mode: single tap plays directly, no preview step
+    if(UI_SETTINGS.expertMode){
+      S.hovH=-1;
+      playCard(tappedIdx);
+      return;
+    }
+    // Normal mode: first tap = preview, second tap on same card = play
     if(S.hovH===tappedIdx){
       S.hovH=-1;
       playCard(tappedIdx);
