@@ -384,6 +384,8 @@ function hostExecuteClientDiscard(idx){
   const l=getL();const p=S.aPos[idx];
   const fx=p?p.x:l.ahX+idx*l.ahSp,fy=p?p.y:l.ahY;
   mpAnim('discard',card,{kind:'hand',owner:1,idx},{kind:'discard'},{dur:400});
+  log(`🗑️ ${MP.oppNick||'Adversaire'} se défausse et pioche.`);
+  showToast(`${MP.oppNick||'Adversaire'} se défausse`,'orange','Il n\'avait aucune carte jouable — pioche une nouvelle carte.',2400);
   S.aH.splice(idx,1);
   addAn(card,fx,fy,l.ddX,l.ddY,400,()=>{
     // IMPORTANT: refill deck BEFORE adding discarded card, so we never redraw what we just discarded
@@ -394,7 +396,6 @@ function hostExecuteClientDiscard(idx){
       S.aH.push(nc);
       mpAnim('draw',nc,{kind:'pile'},{kind:'hand',owner:1,idx:S.aH.length-1},{dur:350,back:true});
     }
-    // Now push the discarded card
     S.discard.push(card);
     hostSync();
     setTimeout(()=>{ogrePh();setTimeout(()=>{finTurn(1);hostSync()},600)},400);
@@ -2322,6 +2323,7 @@ function playerDiscard(idx){
   if(MP.enabled&&!MP.isHost){
     mpSend('discard',{idx,cardId:card.id});
     S.discardMode=false;S.can=false;S.hovH=-1;
+    log(`🗑️ Défausse: ${card.name} → pioche et passe le tour.`);
     uHUD();
     return;
   }
