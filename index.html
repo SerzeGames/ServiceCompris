@@ -280,13 +280,23 @@ function onClientIntent(msg){
   if(!MP.isHost)return;
   const{type,data}=msg;
   if(type==='playCard'){
-    // Client wants to play card at their index
-    // In host's view, client is owner 1, so we play from S.aH
-    if(S.cur!==1||!S.aH[data.idx])return;
-    hostExecuteClientPlay(data.idx);
+    if(S.cur!==1)return;
+    let realIdx=data.idx;
+    let c=S.aH[realIdx];
+    if(!c||(data.cardId&&c.id!==data.cardId)){
+      realIdx=S.aH.findIndex(x=>x.id===data.cardId);
+    }
+    if(realIdx<0||!S.aH[realIdx])return;
+    hostExecuteClientPlay(realIdx);
   } else if(type==='discard'){
-    if(S.cur!==1||!S.aH[data.idx])return;
-    hostExecuteClientDiscard(data.idx);
+    if(S.cur!==1)return;
+    let realIdx=data.idx;
+    let c=S.aH[realIdx];
+    if(!c||(data.cardId&&c.id!==data.cardId)){
+      realIdx=S.aH.findIndex(x=>x.id===data.cardId);
+    }
+    if(realIdx<0||!S.aH[realIdx])return;
+    hostExecuteClientDiscard(realIdx);
   } else if(type==='pass'){
     if(S.cur!==1)return;
     // Convert pass to enter discard mode for client (handled via intent-discard)
@@ -1296,6 +1306,32 @@ function draw(){
   // Buttons below creatures: only Passer (1 action per turn = play a card OR pass)
   if(S.cur===0&&S.can&&!S.ctrPend){
     dBtn(l.bpX-40,l.bpY,200,32,S.discardMode?'🗑️ Choisir carte...':'⏭ Défausser & Passer',S.discardMode?'#885500':'#aa2200',S.hovBtn==='pass');
+    // Show hint if player has no playable cards AND not yet in discard mode
+    if(!S.discardMode&&S.pH.length>0){
+      const hasPlayable=S.pH.some(c=>canPlay(c));
+      if(!hasPlayable){
+        // Banner above the button
+        X.save();
+        const mh=l.mob?44:54;
+        const mw=Math.min(W-20,l.mob?360:560);
+        const mx=(W-mw)/2;
+        const my=l.bpY-mh-10;
+        X.fillStyle='rgba(80,30,0,.92)';
+        rr(mx,my,mw,mh,10);X.fill();
+        X.strokeStyle='#ffaa44';X.lineWidth=2;
+        rr(mx,my,mw,mh,10);X.stroke();
+        // Pulsing glow
+        X.globalAlpha=.2+Math.sin(S.oA*3)*.15;
+        rr(mx-3,my-3,mw+6,mh+6,12);X.strokeStyle='#ff8800';X.lineWidth=3;X.stroke();
+        X.globalAlpha=1;
+        X.textAlign='center';X.textBaseline='middle';
+        X.font=`bold ${l.mob?12:14}px sans-serif`;X.fillStyle='#ffd080';
+        X.fillText('⚠ Aucune carte jouable',mx+mw/2,my+(l.mob?14:16));
+        X.font=`${l.mob?10:12}px sans-serif`;X.fillStyle='#ddd';
+        X.fillText('Défaussez-en une pour en piocher une nouvelle et passer votre tour',mx+mw/2,my+(l.mob?30:38));
+        X.restore();
+      }
+    }
   }
   if(S.eat.length){X.font='10px sans-serif';X.fillStyle='rgba(255,80,80,.4)';X.textAlign='left';X.textBaseline='top';X.fillText(`💀 Dévorés: ${S.eat.length}`,l.tX,l.tY+l.tH+2)}
 
