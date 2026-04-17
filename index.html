@@ -205,21 +205,51 @@ function buildSnapshot(){
   };
 }
 
-function applySnapshot(snap){
-  // If there are active animations, defer the snapshot so it doesn't fight with the anim
-  if(S.anims&&S.anims.length>0){
-    setTimeout(()=>applySnapshot(snap),80);
+// Host broadcasts current state to client (throttled)
+let _lastSync=0, _syncTimer=null;
+function hostSync(){
+  if(!MP.enabled||!MP.isHost)return;
+  const now=Date.now();
+  if(now-_lastSync<90){
+    // Throttle - schedule a later sync instead
+    if(!_syncTimer)_syncTimer=setTimeout(()=>{_syncTimer=null;hostSync()},90-(now-_lastSync));
     return;
   }
+  _lastSync=now;
+  mpSend('snap',buildSnapshot());
+}
+
+// Pending snapshot (only the latest matters)
+let _pendSnap=null, _pendTimer=null;
+function applySnapshot(snap){
+  // If there are active animations, store the snapshot and wait
+  if(S.anims&&S.anims.length>0){
+    _pendSnap=snap;
+    if(!_pendTimer){
+      _pendTimer=setInterval(()=>{
+        if(!S.anims||S.anims.length===0){
+          clearInterval(_pendTimer);_pendTimer=null;
+          if(_pendSnap){const s=_pendSnap;_pendSnap=null;applySnapshot(s)}
+        }
+      },60);
+    }
+    return;
+  }
+  _pendSnap=null;
   // Preserve smooth table positions by matching cards
   const oldTbl={};
-  if(S.tbl)S.tbl.forEach(e=>{if(e.card&&e._x!==undefined)oldTbl[e.card.id+'_'+(e.card.uid||'')+'_'+e.owner]=e._x});
+  if(S.tbl)S.tbl.forEach(e=>{
+    if(e.card&&e._x!==undefined){
+      const key=(e.card.id||'')+'|'+(e.card.name||'')+'|'+(e.card.uid||'')+'|'+e.owner;
+      oldTbl[key]=e._x;
+    }
+  });
   S.pH=snap.pH;
   S.aH=snap.aH;
   S.pC=snap.pC;
   S.aC=snap.aC;
   S.tbl=snap.tbl.map(e=>{
-    const key=e.card.id+'_'+(e.card.uid||'')+'_'+e.owner;
+    const key=(e.card.id||'')+'|'+(e.card.name||'')+'|'+(e.card.uid||'')+'|'+e.owner;
     if(oldTbl[key]!==undefined)e._x=oldTbl[key];
     return e;
   });
@@ -233,12 +263,6 @@ function applySnapshot(snap){
   S.gRate=snap.gRate;
   S.phase=snap.phase;
   uHUD();
-}
-
-// Host broadcasts current state to client
-function hostSync(){
-  if(!MP.enabled||!MP.isHost)return;
-  mpSend('snap',buildSnapshot());
 }
 
 // Host receives client's action intent
@@ -556,8 +580,20 @@ function mpOnMessage(msg){
 }
 
 // Play a remote animation event on client
+const _animDedup={}; // key: card signature, value: timestamp
 function playRemoteAnim(data){
   const{kind,card,fromSrc,toTgt}=data;
+  // Deduplicate: same card+kind+target within 1.2s = ignore
+  if(card){
+    const sig=kind+'|'+(card.id||'')+'|'+(card.name||'')+'|'+JSON.stringify(toTgt||{});
+    const now=Date.now();
+    if(_animDedup[sig]&&now-_animDedup[sig]<1200)return;
+    _animDedup[sig]=now;
+    // Cleanup old entries
+    if(Math.random()<.1){
+      for(const k in _animDedup){if(now-_animDedup[k]>3000)delete _animDedup[k]}
+    }
+  }
   const l=getL();
   // Map "host perspective" → "client perspective" (invert owners)
   function pt(src){
@@ -612,9 +648,20 @@ function playRemoteAnim(data){
         showToast(`🛡️ ${MP.oppNick||'Adversaire'} contre avec : ${card.name}`,'green',card.desc,2600);
       }
     }
-    else if(kind==='eat')spP(to.x+to.w/2,to.y+to.h/2,'#ff0000',15);
-    else if(kind==='sendTable')spP(to.x+to.w/2,to.y+to.h/2,'#ff6b00',10);
-    else if(kind==='return')spP(to.x+to.w/2,to.y+to.h/2,'#44ff44',10);
+    else if(kind==='eat'){
+      spP(to.x+to.w/2,to.y+to.h/2,'#ff0000',15);
+      // Snapshot will remove the card from S.tbl and add to S.eat
+    }
+    else if(kind==='sendTable'){
+      spP(to.x+to.w/2,to.y+to.h/2,'#ff6b00',10);
+      // Don't insert into S.tbl here - the snapshot (deferred until anim completes)
+      // will be the source of truth. This prevents the card from appearing twice
+      // or jittering when its index changes.
+    }
+    else if(kind==='return'){
+      spP(to.x+to.w/2,to.y+to.h/2,'#44ff44',10);
+      // Snapshot will remove the card from S.tbl
+    }
     else if(kind==='discard')spP(to.x+to.w/2,to.y+to.h/2,'#888',8);
   },{back:data.back||false, fw:from.w, fh:from.h, tw:to.w, th:to.h});
 }
@@ -1202,9 +1249,14 @@ let lT=0;
 function upd(ts){
   const dt=Math.min(ts-lT,50);lT=ts;
   for(let i=S.anims.length-1;i>=0;i--){const a=S.anims[i];a.p+=dt/a.dur;if(a.p>=1){a.p=1;if(a.cb)a.cb();S.anims.splice(i,1)}}
+  // When all animations done, immediately apply any pending snapshot
+  if(S.anims.length===0 && _pendSnap){
+    const s=_pendSnap;_pendSnap=null;
+    if(_pendTimer){clearInterval(_pendTimer);_pendTimer=null}
+    applySnapshot(s);
+  }
   S.oA+=.025;
   if(S.actTmr>0){S.actTmr-=dt;if(S.actTmr<=0)S.actCard=null}
-  if(S.effTmr>0){S.effTmr-=dt;if(S.effTmr<=0)S.effCard=null}
   if(S.effTmr>0){S.effTmr-=dt;if(S.effTmr<=0)S.effCard=null}
   for(let i=S.parts.length-1;i>=0;i--){const p=S.parts[i];p.x+=p.vx;p.y+=p.vy;p.vy+=.1;p.l-=p.d;if(p.l<=0)S.parts.splice(i,1)}
 }
