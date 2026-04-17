@@ -842,7 +842,7 @@ function startMpGame(){
     S.dk=[];ACTIONS.forEach(a=>{for(let i=0;i<a.count;i++)S.dk.push({...a,isCrea:false,uid:Math.random().toString(36).slice(2)})});
     shuf(S.dk);S.pH=[];S.aH=[];
     for(let i=0;i<5;i++){if(S.dk.length)S.pH.push(S.dk.pop());if(S.dk.length)S.aH.push(S.dk.pop())}
-    S.tbl=[];S.eat=[];S.turn=1;S.cur=0;S.can=true;S.drawn=false;S.sel=-1;S.phase='play';S.pPos=[];S.aPos=[];S.discard=[];
+    S.tbl=[];S.eat=[];S.turn=1;S.cur=0;S.can=true;S.drawn=false;S.sel=-1;S.phase='play';S.pPos=[];S.aPos=[];S.discard=[];S._emergencyRefills=0;
     log(`🎮 ${MP.myNick} (${pR.name}) vs ${MP.oppNick} (${aR.name}) !`);
     uHUD();
     // Send initial snapshot
@@ -1008,7 +1008,31 @@ function shuf(a){for(let i=a.length-1;i>0;i--){const j=0|Math.random()*(i+1);[a[
 // Refill deck from discard pile when empty
 function refillDeck(){
   if(S.dk.length>0)return;
-  if(S.discard.length===0)return;
+  if(S.discard.length===0){
+    // Emergency fallback: both deck and discard are empty.
+    // Limit to 2 emergency refills per game to avoid infinite stalemate games.
+    if(S._emergencyRefills===undefined)S._emergencyRefills=0;
+    if(S._emergencyRefills>=2){
+      log('⚠️ Pioche épuisée — la partie doit se conclure.');
+      return;
+    }
+    S._emergencyRefills++;
+    const fresh=[];
+    ACTIONS.forEach(a=>{
+      if(a.type==='attack'||a.type==='special'){
+        for(let i=0;i<Math.max(1,Math.floor(a.count/2));i++){
+          fresh.push({...a,isCrea:false,uid:Math.random().toString(36).slice(2)});
+        }
+      }
+    });
+    if(fresh.length>0){
+      S.dk=fresh;
+      shuf(S.dk);
+      log(`♻️ Pioche de secours #${S._emergencyRefills} : nouvelles cartes générées !`);
+      uHUD();
+    }
+    return;
+  }
   // Move all discard back into deck and shuffle
   S.dk=S.discard.splice(0);
   shuf(S.dk);
@@ -1680,7 +1704,7 @@ function startGame(){
   S.dk=[];ACTIONS.forEach(a=>{for(let i=0;i<a.count;i++)S.dk.push({...a,isCrea:false,uid:Math.random().toString(36).slice(2)})});
   shuf(S.dk);S.pH=[];S.aH=[];
   for(let i=0;i<5;i++){if(S.dk.length)S.pH.push(S.dk.pop());if(S.dk.length)S.aH.push(S.dk.pop())}
-  S.tbl=[];S.eat=[];S.turn=1;S.cur=0;S.can=true;S.drawn=false;S.sel=-1;S.phase='play';S.pPos=[];S.aPos=[];
+  S.tbl=[];S.eat=[];S.turn=1;S.cur=0;S.can=true;S.drawn=false;S.sel=-1;S.phase='play';S.pPos=[];S.aPos=[];S._emergencyRefills=0;S.discard=[];
   log(`🎮 ${pR.name} vs ${aR.name} !`);log('📝 Cliquez une carte, re-cliquez pour jouer.');uHUD();
 }
 
@@ -2655,7 +2679,38 @@ function ogrePh(){
 function chkEnd(){
   const pA=S.pC.length+S.tbl.filter(e=>e.owner===0).length;
   const aA=S.aC.length+S.tbl.filter(e=>e.owner===1).length;
-  if(pA===0&&aA===0)endG('draw');else if(pA===0)endG('lose');else if(aA===0)endG('win');
+  if(pA===0&&aA===0)return endG('draw');
+  if(pA===0)return endG('lose');
+  if(aA===0)return endG('win');
+  // Stalemate detection: if the game can't progress further, resolve by creature count
+  const totalCards=S.pH.length+S.aH.length+S.dk.length+S.discard.length;
+  const emergencyExhausted=(S._emergencyRefills||0)>=2 && S.dk.length===0 && S.discard.length<=1;
+  if(totalCards===0||emergencyExhausted||detectStalemate()){
+    log('⚖️ Partie bloquée — résolution au nombre de créatures restantes.');
+    if(pA>aA)return endG('win');
+    if(aA>pA)return endG('lose');
+    return endG('draw');
+  }
+}
+
+// Detect if the game is in a stalemate: neither side can ever play an attack
+// (i.e., the entire card pool contains only non-attack cards or cards that can't affect the game)
+function detectStalemate(){
+  // Count all cards still "in play" (in hands, deck, or discard)
+  const allCards=[].concat(S.pH,S.aH,S.dk,S.discard);
+  if(allCards.length===0)return true;
+  // Check if there's at least one card anywhere that could feasibly be used
+  // Rule of thumb: if no "attack" card exists anywhere, and both players have creatures still in reserve,
+  // the Gueuleton eating rate will resolve it eventually — not a stalemate
+  // The real stalemate case: a player repeatedly holds unplayable cards while pool can't provide new ones
+  // Easy heuristic: stalemate if same-card-discard-redraw cycle detected (tracked by turn counter)
+  // Much simpler: if it's been N turns since any meaningful game state change
+  if(S._lastProgress===undefined)S._lastProgress=S.turn;
+  // Track if cards on table, creatures in reserve, or eat pile changed recently
+  const sig=S.pC.length+'|'+S.aC.length+'|'+S.tbl.length+'|'+S.eat.length;
+  if(S._progressSig!==sig){S._progressSig=sig;S._lastProgress=S.turn}
+  // 15 turns with no progress = stalemate
+  return (S.turn-S._lastProgress)>=15;
 }
 
 // Count how many of a player's creatures got eaten (in S.eat)
@@ -2690,10 +2745,14 @@ function endG(r){
     });
   }
   // Build the local leaderboard
-  const myRace=MP.enabled?S.pRace:S.pRace;
-  const oppRace=MP.enabled?S.aRace:S.aRace;
-  const myNick=MP.enabled?(MP.myNick||'Vous'):'Vous';
-  const oppNick=MP.enabled?(MP.oppNick||'Adversaire'):'IA';
+  const myRace=S.pRace;
+  const oppRace=S.aRace;
+  // In solo mode: use saved pseudo if available, otherwise "Vous"
+  const savedNick=(()=>{
+    try{const v=document.getElementById('nick');return v&&v.value.trim()||null}catch(e){return null}
+  })();
+  const myNick=MP.enabled?(MP.myNick||'Vous'):(savedNick||'Vous');
+  const oppNick=MP.enabled?(MP.oppNick||'Adversaire'):'Ogre IA';
   // Cards eaten "by me" = opponent's creatures that ended up in S.eat
   const myEaten=countEatenBy(oppRace);
   const oppEaten=countEatenBy(myRace);
