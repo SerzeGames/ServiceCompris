@@ -359,8 +359,11 @@ function hostExecuteClientPlay(idx){
       log(`⚠️ ${card.name} — Contrer ?`);
       // Keep the attacker card visible during the counter dialog and animation
       S.actTmr=30000;
+      // Notify client that we (host) are deciding on a counter
+      mpSend('waitCounter',{active:true});
       S.ctrRes=ok=>{
         S.ctrRes=null;
+        mpSend('waitCounter',{active:false});
         if(!ok)execCard(card,1);else log('✅ Contrée !');
         S.actTmr=1800;
         hostSync();
@@ -421,9 +424,10 @@ function finTurn(justPlayed){
 // ========== On client: show counter dialog when host prompts ==========
 function clientShowCounter(cardData){
   // Host asks us (client) to counter their card
-  // Use the same showCtrUI but send result back via counterChoice
   const card=cardData;
   S.ctrPend=true;S.can=false;
+  // Keep the opponent's attacker card visible during the decision
+  S.actTmr=30000;
   const dlg=document.getElementById('ctr-dlg');
   document.getElementById('cdTitle').textContent='⚠️ L\'adversaire joue :';
   const pp=document.getElementById('cdPlayed');pp.innerHTML='';
@@ -593,6 +597,18 @@ function mpOnMessage(msg){
     if(!MP.isHost)playRemoteAnim(data);
   } else if(type==='counterPrompt'){
     if(!MP.isHost)clientShowCounter(data.card);
+  } else if(type==='waitCounter'){
+    // Client receives signal that host is deciding on a counter
+    if(!MP.isHost){
+      S.oppDeciding=!!data.active;
+      if(data.active){
+        // Keep action card visible while host decides
+        S.actTmr=Math.max(S.actTmr,30000);
+      } else {
+        // Host is done; shorten display
+        S.actTmr=Math.min(S.actTmr,2000);
+      }
+    }
   } else if(type==='toast'){
     if(!MP.isHost){
       const d=data.delay||0;
@@ -937,7 +953,7 @@ parts:[],oA:0,oE:false,anims:[],
 actCard:null,actTmr:0,
 effCard:null,effTmr:0,
 pPos:[],aPos:[],
-ctrPend:false,ctrRes:null,
+ctrPend:false,ctrRes:null,oppDeciding:false,
 gueuleton:false,gRate:1,
 discard:[],discardMode:false};
 
@@ -1400,6 +1416,30 @@ function draw(){
     else drawCard(0,0,aw,ah,a.card);
     X.restore();
   }
+  // "Opponent is deciding" banner (shown during counter phase)
+  if(S.oppDeciding){
+    X.save();
+    const bnW=Math.min(W-24,l.mob?360:480);
+    const bnH=l.mob?46:56;
+    const bnX=(W-bnW)/2;
+    const bnY=l.azY+l.azH+8;
+    // Pulsing background
+    const pulse=.5+Math.sin(S.oA*3)*.15;
+    X.fillStyle=`rgba(25,15,50,${.85+Math.sin(S.oA*2)*.05})`;
+    rr(bnX,bnY,bnW,bnH,10);X.fill();
+    X.strokeStyle=`rgba(180,120,255,${.7+Math.sin(S.oA*3)*.2})`;X.lineWidth=2;
+    rr(bnX,bnY,bnW,bnH,10);X.stroke();
+    X.globalAlpha=pulse*.25;
+    rr(bnX-3,bnY-3,bnW+6,bnH+6,12);X.strokeStyle='#b080ff';X.lineWidth=3;X.stroke();
+    X.globalAlpha=1;
+    X.textAlign='center';X.textBaseline='middle';
+    X.font=`bold ${l.mob?13:16}px sans-serif`;X.fillStyle='#ddc0ff';
+    X.fillText('⏳ '+(MP.oppNick||'L\'adversaire')+' peut effectuer une action...',bnX+bnW/2,bnY+bnH/2-(l.mob?8:10));
+    X.font=`${l.mob?10:12}px sans-serif`;X.fillStyle='#a090c0';
+    X.fillText('Il décide s\'il contre votre carte',bnX+bnW/2,bnY+bnH/2+(l.mob?10:12));
+    X.restore();
+  }
+
   drawPt();
 }
 
@@ -1423,8 +1463,33 @@ function upd(ts){
     applySnapshot(s);
   }
   S.oA+=.025;
-  if(S.actTmr>0){S.actTmr-=dt;if(S.actTmr<=0)S.actCard=null}
-  if(S.effTmr>0){S.effTmr-=dt;if(S.effTmr<=0)S.effCard=null}
+  if(S.actTmr>0){
+    S.actTmr-=dt;
+    if(S.actTmr<=0){
+      // Fly the card to the discard pile instead of vanishing
+      if(S.actCard){
+        const l=getL();
+        const fromX=l.azX+(l.azW-l.CW)/2, fromY=l.azY+(l.azH-l.CH)/2;
+        addAn(S.actCard,fromX,fromY,l.ddX,l.ddY,450,()=>{
+          spP(l.ddX+l.ddW/2,l.ddY+l.ddH/2,'#888',6);
+        },{fw:l.CW,fh:l.CH,tw:l.ddW,th:l.ddH});
+      }
+      S.actCard=null;
+    }
+  }
+  if(S.effTmr>0){
+    S.effTmr-=dt;
+    if(S.effTmr<=0){
+      if(S.effCard){
+        const l=getL();
+        const fromX=l.ezX+(l.ezW-l.CW)/2, fromY=l.ezY+(l.ezH-l.CH)/2;
+        addAn(S.effCard,fromX,fromY,l.ddX,l.ddY,450,()=>{
+          spP(l.ddX+l.ddW/2,l.ddY+l.ddH/2,'#888',6);
+        },{fw:l.CW,fh:l.CH,tw:l.ddW,th:l.ddH});
+      }
+      S.effCard=null;
+    }
+  }
   for(let i=S.parts.length-1;i>=0;i--){const p=S.parts[i];p.x+=p.vx;p.y+=p.vy;p.vy+=.1;p.l-=p.d;if(p.l<=0)S.parts.splice(i,1)}
 }
 function loop(ts){upd(ts);draw();requestAnimationFrame(loop)}
@@ -1615,6 +1680,8 @@ function canCtr(c){
 // Counter dialog with card visuals
 function showCtrUI(aiCard){
   S.ctrPend=true;S.can=false;
+  // Keep the attacker card visible during the decision
+  S.actTmr=30000;
   const dlg=document.getElementById('ctr-dlg');
   document.getElementById('cdTitle').textContent=`⚠️ L'adversaire joue :`;
   // Draw played card
@@ -1680,7 +1747,7 @@ C.addEventListener('mousemove',e=>{
   }
 });
 C.addEventListener('click',e=>{
-  if(S.phase!=='play'||S.cur!==0||S.ctrPend)return;
+  if(S.phase!=='play'||S.cur!==0||S.ctrPend||S.oppDeciding)return;
   const mx=e.clientX,my=e.clientY,l=getL();
   
   // In discard mode: click any card to discard it
@@ -1711,7 +1778,7 @@ C.addEventListener('touchstart',e=>{
 C.addEventListener('touchend',e=>{
   e.preventDefault();
   const{x:mx,y:my}=getTouchPos(e);
-  if(S.phase!=='play'||S.cur!==0||S.ctrPend)return;
+  if(S.phase!=='play'||S.cur!==0||S.ctrPend||S.oppDeciding)return;
   const l=getL();
 
   // Find which card was tapped
@@ -1877,16 +1944,15 @@ function execCard(card,ow){
       // Send counter prompt to client
       mpSend('counterPrompt',{card:card});
       S.ctrPend=true;
+      S.oppDeciding=true; // host is waiting for client
       S.ctrRes=ok=>{
-        S.ctrRes=null;S.ctrPend=false;
+        S.ctrRes=null;S.ctrPend=false;S.oppDeciding=false;
         if(ok){log('✅ Contrée par '+MP.oppNick)}
         else{
-          // Not countered — run normal execution
           continueExecCard(card,ow);
         }
         hostSync();
       };
-      // Wait for client's counterChoice message
       return;
     }
   }
