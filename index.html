@@ -391,7 +391,7 @@ function hostExecuteClientDiscard(idx){
       S.discard.push(card);
       S.aH.push(nc);
       // Broadcast draw animation
-      mpAnim('play',nc,{kind:'pile'},{kind:'hand',owner:1,idx:S.aH.length-1},{dur:350,back:true});
+      mpAnim('draw',nc,{kind:'pile'},{kind:'hand',owner:1,idx:S.aH.length-1},{dur:350,back:true});
     } else S.discard.push(card);
     hostSync();
     setTimeout(()=>{ogrePh();setTimeout(()=>{finTurn(1);hostSync()},600)},400);
@@ -646,18 +646,33 @@ function playRemoteAnim(data){
   }
   const from=pt(fromSrc), to=pt(toTgt);
   const dur=data.dur||400;
+  // For 'draw' kind: determine if opponent is drawing (then always show back) or us drawing (flip at end)
+  // toTgt.owner is host's perspective. Client sees opponent when toTgt.owner===0 (host drawing),
+  // and self when toTgt.owner===1 (client drawing).
+  let animOpts={back:data.back||false, fw:from.w, fh:from.h, tw:to.w, th:to.h};
+  if(kind==='draw' && toTgt && toTgt.kind==='hand'){
+    if(toTgt.owner===0){
+      // Host is drawing = opponent from client's perspective - always face down
+      animOpts.alwaysBack=true;
+      animOpts.back=false;
+    }
+    // else toTgt.owner===1: client drawing their own card - keep normal back flip
+  }
   addAn(card,from.x,from.y,to.x,to.y,dur,()=>{
     if(kind==='play'){
       playActSfx();
       // Card lingers in action zone
       if(toTgt.kind==='action'){
         S.actCard=card;S.actTmr=2500;
-        // Only show toast if it's the opponent playing (host's pH = client's aH = fromSrc.owner===0 on host = client's opponent)
-        // On client, fromSrc.owner===0 means "host's hand" which is client's opponent
+        // Only show toast if it's the opponent playing
         if(fromSrc&&fromSrc.kind==='hand'&&fromSrc.owner===0&&card&&card.desc){
           showToast(`${MP.oppNick||'Adversaire'} joue : ${card.name}`,'red',card.desc,2800);
         }
       }
+    }
+    else if(kind==='draw'){
+      // No action sound for draws; optional soft particle
+      spP(to.x+to.w/2,to.y+to.h/2,'#44aaff',6);
     }
     else if(kind==='counter'){
       playCtrSfx();spP(to.x+to.w/2,to.y+to.h/2,'#ff4444',12);
@@ -717,7 +732,7 @@ function playRemoteAnim(data){
       }
     }
     else if(kind==='discard')spP(to.x+to.w/2,to.y+to.h/2,'#888',8);
-  },{back:data.back||false, fw:from.w, fh:from.h, tw:to.w, th:to.h});
+  },animOpts);
 }
 
 // Host: broadcast an animation to client
@@ -936,7 +951,7 @@ function refillDeck(){
 function lerp(a,b,t){return a+(b-a)*t}
 function log(m){const e=document.getElementById('log');e.innerHTML+=`<div style="border-bottom:1px solid #1a1a1a;padding:2px 0">${m}</div>`;e.scrollTop=e.scrollHeight}
 function spP(x,y,c,n=12){for(let i=0;i<n;i++)S.parts.push({x,y,vx:(Math.random()-.5)*7,vy:(Math.random()-.5)*7-2,l:1,d:.015+Math.random()*.02,s:2+Math.random()*4,c})}
-function addAn(card,fx,fy,tx,ty,dur,cb,o={}){S.anims.push({card,fx,fy,tx,ty,p:0,dur:dur||400,cb,back:o.back,fw:o.fw||0,fh:o.fh||0,tw:o.tw||0,th:o.th||0})}
+function addAn(card,fx,fy,tx,ty,dur,cb,o={}){S.anims.push({card,fx,fy,tx,ty,p:0,dur:dur||400,cb,back:o.back,alwaysBack:o.alwaysBack,fw:o.fw||0,fh:o.fh||0,tw:o.tw||0,th:o.th||0})}
 function easeOut(t){return 1-Math.pow(1-t,3)}
 
 // DPR-aware resize (cap DPR on mobile for perf)
@@ -1375,7 +1390,8 @@ function draw(){
     const aw=a.fw&&a.tw?lerp(a.fw,a.tw,t):(a.tw||l.CW);
     const ah=a.fh&&a.th?lerp(a.fh,a.th,t):(a.th||l.CH);
     X.save();X.translate(cx+aw/2,cy+ah/2);X.scale(sc,sc);X.translate(-aw/2,-ah/2);
-    if(a.back&&a.p<.65)drawCard(0,0,aw,ah,a.card,{back:true});
+    if(a.alwaysBack)drawCard(0,0,aw,ah,a.card,{back:true});
+    else if(a.back&&a.p<.65)drawCard(0,0,aw,ah,a.card,{back:true});
     else drawCard(0,0,aw,ah,a.card);
     X.restore();
   }
@@ -1741,14 +1757,14 @@ function autoDraw(who,cb){
     const ti=S.pH.length;const tx=l.phX+ti*l.phSp,ty=l.phY;
     // Broadcast draw to client (host's pH = client's aH, so owner:1 for client perspective inversion)
     if(MP.enabled&&MP.isHost){
-      mpAnim('play',c,{kind:'pile'},{kind:'hand',owner:0,idx:ti},{dur:400,back:true});
+      mpAnim('draw',c,{kind:'pile'},{kind:'hand',owner:0,idx:ti},{dur:400,back:true});
     }
     addAn(c,l.dpX,l.dpY,tx,ty,400,()=>{S.pH.push(c);log(`📥 Pioché: ${c.name}`);spP(tx+l.CW/2,ty+l.CH/2,'#44aaff',8);uHUD();setTimeout(()=>autoDraw(who,cb),150)},{back:true,fw:l.dpW,fh:l.dpH,tw:l.CW,th:l.CH});
   } else {
     const ti=S.aH.length;const tx=l.ahX+ti*l.ahSp,ty=l.ahY;
     // Broadcast client's draw (host's aH = client's pH, so owner:1 in their perspective)
     if(MP.enabled&&MP.isHost){
-      mpAnim('play',c,{kind:'pile'},{kind:'hand',owner:1,idx:ti},{dur:350,back:true});
+      mpAnim('draw',c,{kind:'pile'},{kind:'hand',owner:1,idx:ti},{dur:350,back:true});
     }
     addAn(c,l.dpX,l.dpY,tx,ty,350,()=>{S.aH.push(c);uHUD();setTimeout(()=>autoDraw(who,cb),150)},{back:true,fw:l.dpW,fh:l.dpH,tw:l.TW,th:l.TH});
   }
@@ -2303,7 +2319,7 @@ function playerDiscard(idx){
       const ti=S.pH.length;
       const tx=l.phX+ti*l.phSp,ty=l.phY;
       if(MP.enabled&&MP.isHost){
-        mpAnim('play',nc,{kind:'pile'},{kind:'hand',owner:0,idx:ti},{dur:400,back:true});
+        mpAnim('draw',nc,{kind:'pile'},{kind:'hand',owner:0,idx:ti},{dur:400,back:true});
       }
       addAn(nc,l.dpX,l.dpY,tx,ty,400,()=>{
         S.pH.push(nc);
