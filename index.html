@@ -357,10 +357,12 @@ function hostExecuteClientPlay(idx){
     // Check if WE (host) can counter
     if(card.counters&&card.counters.length&&canCtr(card)){
       log(`⚠️ ${card.name} — Contrer ?`);
+      // Keep the attacker card visible during the counter dialog and animation
+      S.actTmr=30000;
       S.ctrRes=ok=>{
         S.ctrRes=null;
         if(!ok)execCard(card,1);else log('✅ Contrée !');
-        S.actTmr=1500;
+        S.actTmr=1800;
         hostSync();
         setTimeout(()=>{ogrePh();setTimeout(()=>{finTurn(1);hostSync()},600)},400);
       };
@@ -381,18 +383,19 @@ function hostExecuteClientDiscard(idx){
   const card=S.aH[idx];if(!card)return;
   const l=getL();const p=S.aPos[idx];
   const fx=p?p.x:l.ahX+idx*l.ahSp,fy=p?p.y:l.ahY;
-  // Broadcast discard animation: client's card goes from their hand to discard
   mpAnim('discard',card,{kind:'hand',owner:1,idx},{kind:'discard'},{dur:400});
   S.aH.splice(idx,1);
   addAn(card,fx,fy,l.ddX,l.ddY,400,()=>{
+    // IMPORTANT: refill deck BEFORE adding discarded card, so we never redraw what we just discarded
     refillDeck();
+    let nc=null;
     if(S.dk.length){
-      const nc=S.dk.pop();
-      S.discard.push(card);
+      nc=S.dk.pop();
       S.aH.push(nc);
-      // Broadcast draw animation
       mpAnim('draw',nc,{kind:'pile'},{kind:'hand',owner:1,idx:S.aH.length-1},{dur:350,back:true});
-    } else S.discard.push(card);
+    }
+    // Now push the discarded card
+    S.discard.push(card);
     hostSync();
     setTimeout(()=>{ogrePh();setTimeout(()=>{finTurn(1);hostSync()},600)},400);
   },{back:false,fw:l.TW,fh:l.TH,tw:l.ddW,th:l.ddH});
@@ -436,22 +439,23 @@ function clientShowCounter(cardData){
     const lb=document.createElement('div');lb.style.cssText='color:#88ff88;font-size:13px;margin-top:6px;font-weight:bold;pointer-events:none';lb.textContent=c.name;wrap.appendChild(lb);
     const cd=document.createElement('div');cd.style.cssText='color:#aaa;font-size:11px;margin-top:3px;max-width:170px;line-height:1.3;pointer-events:none';cd.textContent=c.desc||'';wrap.appendChild(cd);
     wrap.onclick=()=>{
-      // Find card by id (not reference) because snapshots may have replaced objects
       const idx=S.pH.findIndex(x=>x.id===c.id);
-      console.log('[CLIENT] Counter clicked:', c.name, 'id:', c.id, 'idx:', idx);
       if(idx<0){
-        console.warn('[CLIENT] Counter card no longer in hand! Skipping.');
         dlg.classList.remove('show');S.ctrPend=false;
         mpSend('counterChoice',{choice:{type:'skip'}});
         return;
       }
       dlg.classList.remove('show');S.ctrPend=false;
+      // Keep the attacker card visible until the counter animation completes
+      S.actTmr=4000;
       mpSend('counterChoice',{choice:{type:'use',idx,cardId:c.id}});
     };
     opts.appendChild(wrap);
   });
   document.getElementById('cdSkip').onclick=()=>{
     dlg.classList.remove('show');S.ctrPend=false;
+    // Shortly extend so the user sees the card briefly before it goes away
+    S.actTmr=800;
     mpSend('counterChoice',{choice:{type:'skip'}});
   };
   dlg.classList.add('show');
@@ -605,12 +609,12 @@ const _animDedup={}; // key: card signature, value: timestamp
 function playRemoteAnim(data){
   const{kind,card,fromSrc,toTgt}=data;
   // Deduplicate: same card+kind+target within 1.2s = ignore
-  if(card){
+  // Skip dedup for critical events (play/counter) which should always run
+  if(card && kind!=='play' && kind!=='counter'){
     const sig=kind+'|'+(card.id||'')+'|'+(card.name||'')+'|'+JSON.stringify(toTgt||{});
     const now=Date.now();
     if(_animDedup[sig]&&now-_animDedup[sig]<1200)return;
     _animDedup[sig]=now;
-    // Cleanup old entries
     if(Math.random()<.1){
       for(const k in _animDedup){if(now-_animDedup[k]>3000)delete _animDedup[k]}
     }
@@ -1636,19 +1640,24 @@ function showCtrUI(aiCard){
       dlg.classList.remove('show');S.ctrPend=false;
       const idx=S.pH.indexOf(c);
       const l=getL();
-      // Get card position in hand for animation start
       const p=S.pPos[idx];
       const fx=p?p.x:l.phX+(idx*l.phSp), fy=p?p.y:l.phY;
       if(idx>=0)S.pH.splice(idx,1);
-      // Animate counter card flying to effect zone
       const toX=l.ezX+(l.ezW-l.CW)/2, toY=l.ezY+(l.ezH-l.CH)/2;
-      addAn(c,fx,fy,toX,toY,400,()=>{
-        S.effCard=c;S.effTmr=2500;
+      // Broadcast counter animation to client (MP mode)
+      if(MP.enabled&&MP.isHost){
+        mpAnim('counter',c,{kind:'hand',owner:0,idx},{kind:'effect'},{dur:500});
+      }
+      addAn(c,fx,fy,toX,toY,500,()=>{
+        S.effCard=c;S.effTmr=3000;
         playCtrSfx();
         spP(toX+l.CW/2,toY+l.CH/2,'#44ff44',18);
         log(`🛡️ Contré: ${c.name} !`);
         if(c.id==='surprise_chef'&&S.aC.length){sndE(1);log('↩️ Contre-attaque !')}
-        S.can=true;uHUD();if(S.ctrRes)S.ctrRes(true);
+        S.can=true;uHUD();
+        if(MP.enabled&&MP.isHost)hostSync();
+        // Delay to let both sides see the counter before resolving
+        setTimeout(()=>{if(S.ctrRes)S.ctrRes(true)},MP.enabled?1000:200);
       },{fw:l.CW,fh:l.CH,tw:l.CW,th:l.CH});
     };
     opts.appendChild(wrap);
@@ -1712,7 +1721,24 @@ C.addEventListener('touchend',e=>{
   }
 
   if(S.discardMode){
-    if(tappedIdx>=0){S.hovH=-1;playerDiscard(tappedIdx);return}
+    if(tappedIdx>=0){
+      // Expert mode: single tap discards directly
+      if(UI_SETTINGS.expertMode){
+        S.hovH=-1;
+        playerDiscard(tappedIdx);
+        return;
+      }
+      // Normal mode: first tap = preview, second tap on same card = discard
+      if(S.hovH===tappedIdx){
+        S.hovH=-1;
+        playerDiscard(tappedIdx);
+      } else {
+        S.hovH=tappedIdx;
+      }
+      return;
+    }
+    // Tap outside cards in discard mode: clear preview
+    S.hovH=-1;
     return;
   }
   if(!S.can)return;
@@ -2312,10 +2338,10 @@ function playerDiscard(idx){
   addAn(card,fx,fy,l.ddX,l.ddY,400,()=>{
     spP(l.ddX+l.ddW/2,l.ddY+l.ddH/2,'#888888',10);
     log(`🗑️ Défaussé: ${card.name}`);
+    // Refill deck BEFORE pushing discarded card so we never redraw what we just discarded
     refillDeck();
     if(S.dk.length){
       const nc=S.dk.pop();
-      S.discard.push(card);
       const ti=S.pH.length;
       const tx=l.phX+ti*l.phSp,ty=l.phY;
       if(MP.enabled&&MP.isHost){
@@ -2323,6 +2349,7 @@ function playerDiscard(idx){
       }
       addAn(nc,l.dpX,l.dpY,tx,ty,400,()=>{
         S.pH.push(nc);
+        S.discard.push(card); // push discarded AFTER drawing
         log(`📥 Pioché: ${nc.name}`);
         spP(tx+l.CW/2,ty+l.CH/2,'#44aaff',8);
         uHUD();
@@ -2335,6 +2362,7 @@ function playerDiscard(idx){
         }
       },{back:true,fw:l.dpW,fh:l.dpH,tw:l.CW,th:l.CH});
     } else {
+      // No cards available - just discard, no draw
       S.discard.push(card);
       S.can=false;uHUD();
       if(MP.enabled&&MP.isHost){hostSync();setTimeout(()=>{ogrePh();setTimeout(()=>{finTurn(0);hostSync()},600)},400);}
