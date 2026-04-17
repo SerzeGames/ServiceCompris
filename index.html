@@ -128,6 +128,11 @@ canvas#c{display:block;position:fixed;top:0;left:0;z-index:1}
     <span>🎵 Musique de fond</span>
   </label>
   <div style="color:#888;font-size:11px;margin-left:26px;margin-top:-4px;line-height:1.3">Musique d'ambiance pendant la partie</div>
+  <div id="vol-wrap" style="margin-left:26px;margin-top:8px;display:flex;align-items:center;gap:8px">
+    <span style="color:#bbb;font-size:12px;min-width:42px">Volume</span>
+    <input type="range" id="opt-mus-vol" min="0" max="100" value="18" style="flex:1;accent-color:#ffd700;cursor:pointer"/>
+    <span id="vol-val" style="color:#ffd700;font-size:11px;font-weight:bold;min-width:30px;text-align:right">18%</span>
+  </div>
   <div id="opt-expert-wrap" style="display:none;border-top:1px solid #333;margin-top:10px;padding-top:10px">
     <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:6px 0">
       <input type="checkbox" id="opt-expert" style="width:16px;height:16px;cursor:pointer"/>
@@ -732,7 +737,12 @@ function startMpGame(){
 const UI_SETTINGS={
   toastsEnabled: (typeof localStorage!=='undefined' && localStorage.getItem('sc_toasts')==='0') ? false : true,
   expertMode: (typeof localStorage!=='undefined' && localStorage.getItem('sc_expert')==='1') ? true : false,
-  musicEnabled: (typeof localStorage!=='undefined' && localStorage.getItem('sc_music')==='0') ? false : true
+  musicEnabled: (typeof localStorage!=='undefined' && localStorage.getItem('sc_music')==='0') ? false : true,
+  musicVolume: (function(){
+    if(typeof localStorage==='undefined')return 0.18;
+    const v=parseInt(localStorage.getItem('sc_musvol')||'',10);
+    return (isNaN(v)||v<0||v>100)?0.18:(v/100);
+  })()
 };
 // Mobile detection done ONCE at load (not per-frame)
 const IS_MOBILE=(typeof window!=='undefined')&&(('ontouchstart' in window)||window.innerWidth<800||/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent||''));
@@ -757,14 +767,12 @@ sfxContre.volume=0.50;
 const MUSIC_TRACKS=['son/music.mp3'];
 let _mus=null; // current Audio element
 let _musIdx=0;
-const MUSIC_VOL=0.18; // Low volume so SFX cut through
 
 function createMusicEl(src){
   const a=new Audio(src);
   a.loop=(MUSIC_TRACKS.length===1); // Only loop if single track; otherwise we'll chain
-  a.volume=UI_SETTINGS.musicEnabled?MUSIC_VOL:0;
+  a.volume=UI_SETTINGS.musicEnabled?UI_SETTINGS.musicVolume:0;
   a.preload='auto';
-  // When track ends (if not looping), play next
   a.addEventListener('ended',()=>{
     if(MUSIC_TRACKS.length>1){
       _musIdx=(_musIdx+1)%MUSIC_TRACKS.length;
@@ -781,7 +789,6 @@ function startMusic(idx=0){
     _mus=createMusicEl(MUSIC_TRACKS[_musIdx]);
     if(UI_SETTINGS.musicEnabled){
       _mus.play().catch(()=>{
-        // Autoplay may be blocked until user interaction - retry on first click
         const retry=()=>{
           if(_mus&&UI_SETTINGS.musicEnabled)_mus.play().catch(()=>{});
           document.removeEventListener('click',retry);
@@ -799,11 +806,18 @@ function setMusicEnabled(on){
   try{localStorage.setItem('sc_music',on?'1':'0')}catch(e){}
   if(!_mus)return;
   if(on){
-    _mus.volume=MUSIC_VOL;
+    _mus.volume=UI_SETTINGS.musicVolume;
     _mus.play().catch(()=>{});
   } else {
     _mus.pause();
   }
+}
+
+function setMusicVolume(v){
+  v=Math.max(0,Math.min(1,v));
+  UI_SETTINGS.musicVolume=v;
+  try{localStorage.setItem('sc_musvol',String(Math.round(v*100)))}catch(e){}
+  if(_mus&&UI_SETTINGS.musicEnabled)_mus.volume=v;
 }
 let sL=0;function oL(){sL++}
 iR.onload=oL;iE.onload=oL;iT.onload=oL;iB.onload=oL;
@@ -1384,7 +1398,27 @@ requestAnimationFrame(loop);
   chk.checked=UI_SETTINGS.toastsEnabled;
   if(chkMus){
     chkMus.checked=UI_SETTINGS.musicEnabled;
-    chkMus.onchange=()=>setMusicEnabled(chkMus.checked);
+    chkMus.onchange=()=>{
+      setMusicEnabled(chkMus.checked);
+      // Grey the slider when music disabled
+      const vw=document.getElementById('vol-wrap');
+      if(vw)vw.style.opacity=chkMus.checked?'1':'.4';
+    };
+  }
+  // Volume slider
+  const slider=document.getElementById('opt-mus-vol');
+  const volVal=document.getElementById('vol-val');
+  const volWrap=document.getElementById('vol-wrap');
+  if(slider){
+    const initPct=Math.round(UI_SETTINGS.musicVolume*100);
+    slider.value=initPct;
+    if(volVal)volVal.textContent=initPct+'%';
+    if(volWrap)volWrap.style.opacity=UI_SETTINGS.musicEnabled?'1':'.4';
+    slider.oninput=()=>{
+      const v=parseInt(slider.value,10)/100;
+      setMusicVolume(v);
+      if(volVal)volVal.textContent=slider.value+'%';
+    };
   }
   // Show expert mode option only on mobile (it's useless on desktop)
   if(IS_MOBILE&&expWrap){
