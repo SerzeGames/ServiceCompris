@@ -869,7 +869,7 @@ const ACTIONS=[
 {id:'garde_manger',name:'Garde-Manger',desc:'Protège contre « Goinfrérie ».',type:'defense',count:1,sprite:'garde_manger',counters:[]},
 {id:'surprise_chef',name:'Surprise du Chef',desc:'Annule « À Table ! ». Adversaire livre un sien.',type:'defense',count:2,sprite:'surprise_chef',counters:[]},
 {id:'trop_sale',name:'Trop Salé',desc:'Annule « À Table ! ».',type:'defense',count:2,sprite:'trop_sale',counters:[]},
-{id:'chaud_devant',name:'Chaud Devant',desc:'Réorganisez les positions sur la table.',type:'special',count:1,sprite:'chaud_devant',counters:[]},
+{id:'chaud_devant',name:'Chaud Devant',desc:'Pousse vos cartes au fond, celles de l\'adversaire près de l\'assiette.',type:'special',count:1,sprite:'chaud_devant',counters:[]},
 {id:'indigestion',name:'Indigestion',desc:'Enlevez tous les personnages de la table.',type:'special',count:1,sprite:'indigestion',counters:[]},
 {id:'pas_bon',name:'Pas Bon !',desc:'Enlevez tous vos personnages de la table.',type:'defense',count:1,sprite:'pas_bon',counters:[]},
 {id:'retour_cuisine',name:'Retour en Cuisine',desc:'Enlevez un personnage de la table.',type:'defense',count:1,sprite:'retour_cuisine',counters:['chef_parti']},
@@ -1914,7 +1914,18 @@ function continueExecCard(card,ow){
     case'trop_sale':
       log('🛡️ Trop Salé !');break;
     case'chaud_devant':
-      shuf(S.tbl);log('🔀 Positions mélangées !');break;
+      // Caster (ow) pushes their own cards to the back (furthest from plate)
+      // and opponent's cards to the front (closest to plate = leftmost, index 0)
+      {
+        const casterOwn=ow; // caster's owner id
+        // Split entries by ownership, preserving relative order within each group
+        const opp=S.tbl.filter(e=>e.owner!==casterOwn);
+        const mine=S.tbl.filter(e=>e.owner===casterOwn);
+        // Opponent first (closest to plate / leftmost), then caster's cards (furthest / rightmost)
+        S.tbl=opp.concat(mine);
+        log('🔀 Chaud devant — positions réorganisées !');
+      }
+      break;
     case'indigestion':
       retA();log('💨 Table vidée !');break;
     case'pas_bon':
@@ -2353,7 +2364,13 @@ function aiPlayCard(){
     if(c.type!=='special')return false;
     if(c.id==='veneneux')return S.tbl.some(e=>e.owner===0); // remove player's from table
     if(c.id==='indigestion')return S.tbl.some(e=>e.owner===1)&&S.tbl.length>0; // only if AI has creatures to save
-    if(c.id==='chaud_devant')return S.tbl.length>=2;
+    if(c.id==='chaud_devant'){
+      // Useful only if pushing player cards to the front would change something:
+      // i.e. at least one player card on table that is NOT already the leftmost
+      const firstPlayer=S.tbl.findIndex(e=>e.owner===0);
+      const firstAi=S.tbl.findIndex(e=>e.owner===1);
+      return firstPlayer>=0 && (firstAi<firstPlayer);
+    }
     if(c.id==='ronde')return S.tbl.some(e=>e.owner===1)&&S.pC.length>0;
     return false;
   });
