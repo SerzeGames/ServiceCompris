@@ -319,7 +319,8 @@ function onClientIntent(msg){
           playCtrSfx();
           spP(toX+l.CW/2,toY+l.CH/2,'#44ff44',18);
           log(`🛡️ Contré par ${MP.oppNick}: ${c.name} !`);
-          if(c.id==='surprise_chef'&&S.pC.length)sndE(1);
+          // Surprise du Chef: the ATTACKER (= host here, since client is countering host's card) sends one of their own creatures
+          if(c.id==='surprise_chef'&&S.pC.length)aiSP(1);
           setTimeout(()=>{if(S.ctrRes)S.ctrRes(true);hostSync()},1200);
         },{back:false,fw:l.TW,fh:l.TH,tw:l.CW,th:l.CH});
       } else {
