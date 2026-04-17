@@ -1793,7 +1793,8 @@ function autoDraw(who,cb){
     if(MP.enabled&&MP.isHost){
       mpAnim('draw',c,{kind:'pile'},{kind:'hand',owner:1,idx:ti},{dur:350,back:true});
     }
-    addAn(c,l.dpX,l.dpY,tx,ty,350,()=>{S.aH.push(c);uHUD();setTimeout(()=>autoDraw(who,cb),150)},{back:true,fw:l.dpW,fh:l.dpH,tw:l.TW,th:l.TH});
+    // Local animation: opponent's card should stay face-down the whole way
+    addAn(c,l.dpX,l.dpY,tx,ty,350,()=>{S.aH.push(c);uHUD();setTimeout(()=>autoDraw(who,cb),150)},{alwaysBack:true,fw:l.dpW,fh:l.dpH,tw:l.TW,th:l.TH});
   }
 }
 
@@ -2401,7 +2402,7 @@ function aiDiscard(cb){
         S.aH.push(nc);
         uHUD();
         if(cb)cb();
-      },{back:true,fw:l.dpW,fh:l.dpH,tw:l.TW,th:l.TH});
+      },{alwaysBack:true,fw:l.dpW,fh:l.dpH,tw:l.TW,th:l.TH});
     } else {
       S.discard.push(card);
       uHUD();if(cb)cb();
