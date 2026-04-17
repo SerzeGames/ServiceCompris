@@ -123,6 +123,11 @@ canvas#c{display:block;position:fixed;top:0;left:0;z-index:1}
     <span>Afficher les actions adverses</span>
   </label>
   <div style="color:#888;font-size:11px;margin-left:26px;margin-top:-4px;line-height:1.3">Toasts décrivant les cartes jouées par l'adversaire</div>
+  <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:6px 0;border-top:1px solid #333;margin-top:10px;padding-top:12px">
+    <input type="checkbox" id="opt-music" checked style="width:16px;height:16px;cursor:pointer"/>
+    <span>🎵 Musique de fond</span>
+  </label>
+  <div style="color:#888;font-size:11px;margin-left:26px;margin-top:-4px;line-height:1.3">Musique d'ambiance pendant la partie</div>
   <div id="opt-expert-wrap" style="display:none;border-top:1px solid #333;margin-top:10px;padding-top:10px">
     <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:6px 0">
       <input type="checkbox" id="opt-expert" style="width:16px;height:16px;cursor:pointer"/>
@@ -694,6 +699,7 @@ function startMpGame(){
   document.getElementById('hud').style.display='flex';
   document.getElementById('settings-btn').style.display='flex';
   if(!getL().mob)document.getElementById('log').style.display='block';
+  startMusic(0);
   
   if(MP.isHost){
     // Host sets up the full game state
@@ -725,7 +731,8 @@ function startMpGame(){
 // User settings (persisted in localStorage)
 const UI_SETTINGS={
   toastsEnabled: (typeof localStorage!=='undefined' && localStorage.getItem('sc_toasts')==='0') ? false : true,
-  expertMode: (typeof localStorage!=='undefined' && localStorage.getItem('sc_expert')==='1') ? true : false
+  expertMode: (typeof localStorage!=='undefined' && localStorage.getItem('sc_expert')==='1') ? true : false,
+  musicEnabled: (typeof localStorage!=='undefined' && localStorage.getItem('sc_music')==='0') ? false : true
 };
 // Mobile detection done ONCE at load (not per-frame)
 const IS_MOBILE=(typeof window!=='undefined')&&(('ontouchstart' in window)||window.innerWidth<800||/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent||''));
@@ -742,7 +749,62 @@ if(IS_MOBILE){
 const iR=new Image(),iE=new Image(),iT=new Image(),iB=new Image();
 const sfxAction=new Audio('son/action.mp3');
 const sfxContre=new Audio('son/contre.mp3');
-sfxAction.volume=0.3;sfxContre.volume=0.35;
+// Volumes tuned so music sits under SFX without drowning them out
+sfxAction.volume=0.45;
+sfxContre.volume=0.50;
+
+// Background music - loops; future tracks can be added to this array
+const MUSIC_TRACKS=['son/music.mp3'];
+let _mus=null; // current Audio element
+let _musIdx=0;
+const MUSIC_VOL=0.18; // Low volume so SFX cut through
+
+function createMusicEl(src){
+  const a=new Audio(src);
+  a.loop=(MUSIC_TRACKS.length===1); // Only loop if single track; otherwise we'll chain
+  a.volume=UI_SETTINGS.musicEnabled?MUSIC_VOL:0;
+  a.preload='auto';
+  // When track ends (if not looping), play next
+  a.addEventListener('ended',()=>{
+    if(MUSIC_TRACKS.length>1){
+      _musIdx=(_musIdx+1)%MUSIC_TRACKS.length;
+      startMusic(_musIdx);
+    }
+  });
+  return a;
+}
+
+function startMusic(idx=0){
+  try{
+    if(_mus){_mus.pause();_mus.src=''}
+    _musIdx=idx%MUSIC_TRACKS.length;
+    _mus=createMusicEl(MUSIC_TRACKS[_musIdx]);
+    if(UI_SETTINGS.musicEnabled){
+      _mus.play().catch(()=>{
+        // Autoplay may be blocked until user interaction - retry on first click
+        const retry=()=>{
+          if(_mus&&UI_SETTINGS.musicEnabled)_mus.play().catch(()=>{});
+          document.removeEventListener('click',retry);
+          document.removeEventListener('touchstart',retry);
+        };
+        document.addEventListener('click',retry,{once:true});
+        document.addEventListener('touchstart',retry,{once:true});
+      });
+    }
+  }catch(e){console.warn('Music error:',e)}
+}
+
+function setMusicEnabled(on){
+  UI_SETTINGS.musicEnabled=on;
+  try{localStorage.setItem('sc_music',on?'1':'0')}catch(e){}
+  if(!_mus)return;
+  if(on){
+    _mus.volume=MUSIC_VOL;
+    _mus.play().catch(()=>{});
+  } else {
+    _mus.pause();
+  }
+}
 let sL=0;function oL(){sL++}
 iR.onload=oL;iE.onload=oL;iT.onload=oL;iB.onload=oL;
 iR.src=B+'races.jpg';iE.src=B+'effets.jpg';iT.src=B+'Gueuleton.jpg';iB.src=B+'cardback.jpg';
@@ -1317,8 +1379,13 @@ requestAnimationFrame(loop);
   const chk=document.getElementById('opt-toast');
   const chkExp=document.getElementById('opt-expert');
   const expWrap=document.getElementById('opt-expert-wrap');
+  const chkMus=document.getElementById('opt-music');
   if(!btn||!pan||!chk)return;
   chk.checked=UI_SETTINGS.toastsEnabled;
+  if(chkMus){
+    chkMus.checked=UI_SETTINGS.musicEnabled;
+    chkMus.onchange=()=>setMusicEnabled(chkMus.checked);
+  }
   // Show expert mode option only on mobile (it's useless on desktop)
   if(IS_MOBILE&&expWrap){
     expWrap.style.display='block';
@@ -1368,6 +1435,7 @@ function startGame(){
   document.getElementById('hud').style.display='flex';
   document.getElementById('settings-btn').style.display='flex';
   if(!getL().mob)document.getElementById('log').style.display='block';
+  startMusic(0);
   const ot=RACES.filter(r=>r.id!==S.pRace);
   S.aRace=ot[0|Math.random()*ot.length].id;
   const pR=RACES.find(r=>r.id===S.pRace),aR=RACES.find(r=>r.id===S.aRace);
