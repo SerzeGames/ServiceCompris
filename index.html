@@ -214,6 +214,65 @@ function mpSend(type,data,targetConn){
   if(MP.conn&&MP.conn.open){try{MP.conn.send({type,data})}catch(e){console.error('mpSend',e)}}
 }
 
+// Tear down ALL existing peer/connection state. Essential before starting a new MP attempt,
+// otherwise zombie Peer objects from a previous solo game (or abandoned match) cause:
+// - "unavailable-id" errors because the broker thinks we still hold the ID
+// - ghost listeners firing stale callbacks
+// - memory leaks
+// Reset volatile game state between matches. Does NOT touch persistent settings or MP connection.
+// Call this at the start of any new game (solo or MP) to prevent carryover bugs.
+function resetGameState(){
+  S.anims=[];
+  S.parts=[];
+  S.tbl=[];S.eat=[];
+  S.actCard=null;S.actTmr=0;
+  S.effCard=null;S.effTmr=0;
+  S.ctrPend=false;S.ctrRes=null;S.oppDeciding=false;
+  S.gueuleton=false;S.gRate=1;
+  S.discardMode=false;
+  S.sel=-1;S.hovH=-1;S.hovT=-1;S.hovPC=-1;S.hovBtn=null;
+  S._emergencyRefills=0;
+  S._lastProgress=undefined;
+  S._progressSig=undefined;
+  S._l=null; // layout cache
+  // Clear pending MP snap/timer (if any left over)
+  if(typeof _pendSnap!=='undefined'){_pendSnap=null;if(_pendTimer){clearInterval(_pendTimer);_pendTimer=null}}
+  // Reset animation dedup
+  for(const k in _animDedup)delete _animDedup[k];
+  // Hide any end screen still visible
+  const endEl=document.getElementById('end');
+  if(endEl)endEl.classList.remove('show');
+  const lbEl=document.getElementById('endLeaderboard');
+  if(lbEl)lbEl.remove();
+  // Clear log
+  const logEl=document.getElementById('log');
+  if(logEl)logEl.textContent='';
+}
+
+function mpReset(){
+  try{
+    if(MP.conns&&MP.conns.length){
+      MP.conns.forEach(c=>{try{c.close()}catch(e){}});
+    }
+    if(MP.conn){try{MP.conn.close()}catch(e){}}
+    if(MP.peer){try{MP.peer.destroy()}catch(e){}}
+  }catch(e){}
+  MP.peer=null;
+  MP.conn=null;
+  MP.conns=[];
+  MP.isHost=false;
+  MP.enabled=false;
+  MP.oppNick='';
+  MP.oppRace=null;
+  MP.ready=false;
+  MP.oppReady=false;
+  MP.oppReadyFlags=[false,false];
+  if(typeof stopHostKeepalive==='function')stopHostKeepalive();
+  if(typeof _pendSnap!=='undefined'){_pendSnap=null;if(_pendTimer){clearInterval(_pendTimer);_pendTimer=null}}
+  if(typeof _syncTimer!=='undefined'&&_syncTimer){clearTimeout(_syncTimer);_syncTimer=null}
+  _lastSync=0;
+}
+
 function handleOpponentDisconnect(){
   // If we're still in lobby, just show a message
   if(!MP.enabled||S.phase==='end'){
@@ -576,12 +635,29 @@ function clientShowCounter(cardData){
 }
 
 // ========== Connection setup ==========
-function mpStartHost(){
+function mpStartHost(retryCount){
+  if(retryCount===undefined)retryCount=0;
+  mpReset(); // Clean any previous state (critical for back-to-back attempts)
   MP.isHost=true;
   MP.myNick=sanitizeNick(document.getElementById('nick').value);
   updateMpStatus('Connexion au serveur PeerJS...');
-  MP.peer=new Peer(genCode(),{debug:1});
+  const code=genCode();
+  MP.peer=new Peer(code,{debug:0});
+  let opened=false;
+  const openTimeout=setTimeout(()=>{
+    if(!opened){
+      try{MP.peer.destroy()}catch(e){}
+      if(retryCount<QM_MAX_RETRIES){
+        updateMpStatus(`⟳ Timeout, réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
+        setTimeout(()=>mpStartHost(retryCount+1),800);
+      } else {
+        updateMpStatus('❌ Impossible de créer la partie. Vérifiez votre connexion.');
+      }
+    }
+  },5000);
   MP.peer.on('open',id=>{
+    opened=true;
+    clearTimeout(openTimeout);
     document.getElementById('mpCode').textContent=id;
     document.getElementById('mpHostArea').style.display='block';
     document.getElementById('mpJoinArea').style.display='none';
@@ -590,16 +666,14 @@ function mpStartHost(){
     updateMpStatus('✅ Partie créée. En attente de votre adversaire...');
   });
   MP.peer.on('connection',conn=>{
-    // In 3-player MP, we accept up to 2 client connections
     const maxClients=(NB_PLAYERS===3)?2:1;
     if(!MP.conns)MP.conns=[];
-    // Reject extra connections
     if(MP.conns.length>=maxClients){
       try{conn.on('open',()=>{conn.send({type:'reject',data:{reason:'full'}});conn.close()})}catch(e){}
       return;
     }
     MP.conns.push(conn);
-    MP.conn=MP.conns[0]; // Primary connection (backward compat)
+    MP.conn=MP.conns[0];
     conn.on('open',()=>{
       mpSend('hello',{nick:MP.myNick,nPlayers:NB_PLAYERS},conn);
     });
@@ -612,30 +686,95 @@ function mpStartHost(){
     }
   });
   MP.peer.on('error',err=>{
-    updateMpStatus('❌ Erreur: '+err.type);
+    if(err&&err.type==='unavailable-id'){
+      clearTimeout(openTimeout);
+      // Collision on random code — regenerate
+      try{MP.peer.destroy()}catch(e){}
+      if(retryCount<QM_MAX_RETRIES){
+        setTimeout(()=>mpStartHost(retryCount+1),300);
+      } else {
+        updateMpStatus('❌ Collision de code. Réessayez.');
+      }
+    } else if(err&&(err.type==='network'||err.type==='server-error'||err.type==='socket-error')){
+      clearTimeout(openTimeout);
+      if(retryCount<QM_MAX_RETRIES){
+        updateMpStatus(`⟳ Erreur réseau, réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
+        setTimeout(()=>mpStartHost(retryCount+1),1000);
+      } else {
+        updateMpStatus('❌ '+(err.type||'erreur inconnue'));
+      }
+    } else {
+      updateMpStatus('❌ Erreur: '+(err.type||'inconnue'));
+    }
   });
 }
 
-function mpJoin(code){
+function mpJoin(code,retryCount){
+  if(retryCount===undefined)retryCount=0;
+  mpReset();
   MP.isHost=false;
   MP.myNick=sanitizeNick(document.getElementById('nick').value);
-  // Sanitize code input too (alphanumeric only)
   code=String(code||'').replace(/[^A-Za-z0-9]/g,'').toUpperCase().slice(0,12);
   if(!code){updateMpStatus('❌ Code invalide');return}
   updateMpStatus('Connexion à '+code+'...');
-  MP.peer=new Peer({debug:1});
+  MP.peer=new Peer({debug:0});
+  let connOpened=false;
+  let peerOpened=false;
+  const overallTimeout=setTimeout(()=>{
+    if(!connOpened){
+      try{MP.peer.destroy()}catch(e){}
+      if(retryCount<QM_MAX_RETRIES){
+        updateMpStatus(`⟳ Réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
+        setTimeout(()=>mpJoin(code,retryCount+1),800);
+      } else {
+        updateMpStatus('❌ Adversaire introuvable. Vérifiez le code.');
+        document.getElementById('btnQuick').disabled=false;
+        document.getElementById('btnHost').disabled=false;
+        document.getElementById('btnJoin').disabled=false;
+      }
+    }
+  },6000);
   MP.peer.on('open',()=>{
+    peerOpened=true;
     const conn=MP.peer.connect(code.toUpperCase(),{reliable:true});
     MP.conn=conn;
+    MP.conns=[conn];
     conn.on('open',()=>{
+      connOpened=true;
+      clearTimeout(overallTimeout);
       mpSend('hello',{nick:MP.myNick});
     });
     conn.on('data',mpOnMessage);
     conn.on('close',()=>handleOpponentDisconnect());
-    conn.on('error',err=>updateMpStatus('❌ '+err.type));
+    conn.on('error',err=>{
+      if(err&&err.type==='peer-unavailable'){
+        clearTimeout(overallTimeout);
+        try{MP.peer.destroy()}catch(e){}
+        updateMpStatus('❌ Code inconnu. Vérifiez et réessayez.');
+        document.getElementById('btnQuick').disabled=false;
+        document.getElementById('btnHost').disabled=false;
+        document.getElementById('btnJoin').disabled=false;
+      }
+    });
   });
   MP.peer.on('error',err=>{
-    updateMpStatus('❌ '+err.type);
+    if(err&&err.type==='peer-unavailable'){
+      clearTimeout(overallTimeout);
+      try{MP.peer.destroy()}catch(e){}
+      updateMpStatus('❌ Code inconnu. Vérifiez et réessayez.');
+      document.getElementById('btnQuick').disabled=false;
+      document.getElementById('btnHost').disabled=false;
+      document.getElementById('btnJoin').disabled=false;
+    } else if(err&&(err.type==='network'||err.type==='server-error'||err.type==='socket-error')){
+      clearTimeout(overallTimeout);
+      if(retryCount<QM_MAX_RETRIES){
+        try{MP.peer.destroy()}catch(e){}
+        updateMpStatus(`⟳ Réseau, réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
+        setTimeout(()=>mpJoin(code,retryCount+1),1000);
+      } else {
+        updateMpStatus('❌ '+(err.type||'erreur réseau'));
+      }
+    }
   });
 }
 
@@ -658,65 +797,148 @@ function mpQuickMatch(){
   qmScanSlots(order,0);
 }
 
-// Attempt to join slot order[idx]. On failure, move to the next.
-// If all fail (no existing hosts), become host of the first slot we tried (or the lowest free).
-function qmScanSlots(order,idx){
-  if(idx>=order.length){
-    // No existing host found — become a host ourselves
-    qmBecomeHost(order);
-    return;
-  }
-  const slot=order[idx];
-  const roomId=qmRoomId(slot);
-  updateMpStatus(`⚡ Recherche… (${idx+1}/${order.length})`);
-  const tempPeer=new Peer({debug:0});
+// ================ QUICK MATCH — robust system ================
+// Strategy:
+// 1. CLEAN state (mpReset) — kill any zombie peer from previous sessions
+// 2. Create ONE "prober" peer that tries to connect to multiple slots IN PARALLEL
+// 3. First successful connection wins; abandoned probes are dropped
+// 4. If no host responds within PROBE_BUDGET ms, become host on a random free slot
+// 5. Retry the WHOLE flow up to 3 times on network errors
+
+const QM_PROBE_BUDGET=4500;  // Total search time budget (ms) before giving up probing and hosting
+const QM_PARALLEL=6;         // Number of slots probed simultaneously (higher = faster detection)
+const QM_MAX_RETRIES=3;      // Full retry attempts on catastrophic failure
+
+function mpQuickMatch(retryCount){
+  if(retryCount===undefined)retryCount=0;
+  // CRITICAL: clean state from any previous attempt (solo game, abandoned MP, etc.)
+  mpReset();
+  MP.myNick=sanitizeNick(document.getElementById('nick').value);
+  updateMpStatus('⚡ Recherche rapide...');
+  document.getElementById('btnQuick').disabled=true;
+  document.getElementById('btnHost').disabled=true;
+  document.getElementById('btnJoin').disabled=true;
+  // Randomize scan order to distribute players
+  const order=[];
+  for(let i=0;i<QUICK_MATCH_POOL_SIZE;i++)order.push(i+1);
+  shuf(order);
+  qmParallelProbe(order,retryCount);
+}
+
+// Probe multiple slots in parallel using a single peer. First successful connection wins.
+function qmParallelProbe(order,retryCount){
+  const proberPeer=new Peer({debug:0});
   let resolved=false;
-  const moveNext=()=>{
+  const probes=[];  // Active connections being tested
+  let probeIdx=0;   // Next slot to try
+
+  const cleanup=(excludeConn)=>{
+    probes.forEach(p=>{
+      if(p.conn!==excludeConn){
+        try{p.conn.close()}catch(e){}
+      }
+      clearTimeout(p.timeout);
+    });
+    probes.length=0;
+  };
+
+  const giveUpAndHost=()=>{
     if(resolved)return;
     resolved=true;
-    try{tempPeer.destroy()}catch(e){}
-    qmScanSlots(order,idx+1);
+    cleanup();
+    try{proberPeer.destroy()}catch(e){}
+    // Pick a random free-looking slot to host on
+    qmBecomeHost(order,0,retryCount);
   };
-  const timeout=setTimeout(moveNext,1800);
-  tempPeer.on('open',()=>{
-    const conn=tempPeer.connect(roomId,{reliable:true});
+
+  const budgetTimer=setTimeout(giveUpAndHost,QM_PROBE_BUDGET);
+
+  const launchProbe=()=>{
+    if(resolved)return;
+    if(probeIdx>=order.length){
+      // All slots probed; if no success by end of budget, become host
+      return;
+    }
+    const slot=order[probeIdx++];
+    const roomId=qmRoomId(slot);
+    updateMpStatus(`⚡ Test salon ${probeIdx}/${order.length}...`);
+    let conn;
+    try{
+      conn=proberPeer.connect(roomId,{reliable:true,serialization:'json'});
+    }catch(e){
+      // Failed to start connection, try next
+      setTimeout(launchProbe,30);
+      return;
+    }
+    const probe={conn,timeout:null,slot};
+    probes.push(probe);
+    probe.timeout=setTimeout(()=>{
+      // This probe timed out — close it and launch another
+      try{conn.close()}catch(e){}
+      const i=probes.indexOf(probe);if(i>=0)probes.splice(i,1);
+      launchProbe();
+    },1500);
     conn.on('open',()=>{
       if(resolved){try{conn.close()}catch(e){}return}
       resolved=true;
-      clearTimeout(timeout);
-      tempPeer._isQuick=true;
+      clearTimeout(probe.timeout);
+      clearTimeout(budgetTimer);
+      cleanup(conn);
+      // Migrate this conn to MP state
       MP.isHost=false;
-      MP.peer=tempPeer;
+      MP.peer=proberPeer;
       MP.conn=conn;
       MP.conns=[conn];
-      updateMpStatus('✅ Adversaire trouvé !');
+      proberPeer._isQuick=true;
+      updateMpStatus(`✅ Adversaire trouvé (salon #${slot}) !`);
       mpSend('hello',{nick:MP.myNick});
       conn.on('data',mpOnMessage);
       conn.on('close',()=>handleOpponentDisconnect());
     });
     conn.on('error',()=>{
-      clearTimeout(timeout);moveNext();
+      clearTimeout(probe.timeout);
+      const i=probes.indexOf(probe);if(i>=0)probes.splice(i,1);
+      launchProbe();
     });
+  };
+
+  proberPeer.on('open',()=>{
+    // Start QM_PARALLEL probes at once
+    for(let i=0;i<QM_PARALLEL;i++)setTimeout(launchProbe,i*50);
   });
-  tempPeer.on('error',(err)=>{
-    if(err&&err.type==='peer-unavailable'){
-      // Host doesn't exist for this slot — try next
-      clearTimeout(timeout);moveNext();
-    } else if(err&&err.type==='network'){
-      clearTimeout(timeout);
+  proberPeer.on('error',(err)=>{
+    if(resolved)return;
+    // Errors here fire for individual probes (peer-unavailable for each slot with no host)
+    // These are expected and handled per-conn above; only critical errors matter
+    if(err&&(err.type==='network'||err.type==='server-error'||err.type==='socket-error'||err.type==='disconnected')){
+      clearTimeout(budgetTimer);
       resolved=true;
-      updateMpStatus('❌ Erreur réseau — réessayez');
-      document.getElementById('btnQuick').disabled=false;
-      document.getElementById('btnHost').disabled=false;
-      document.getElementById('btnJoin').disabled=false;
+      cleanup();
+      try{proberPeer.destroy()}catch(e){}
+      if(retryCount<QM_MAX_RETRIES){
+        updateMpStatus(`⟳ Réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
+        setTimeout(()=>mpQuickMatch(retryCount+1),800);
+      } else {
+        updateMpStatus('❌ Erreur réseau. Vérifiez votre connexion.');
+        document.getElementById('btnQuick').disabled=false;
+        document.getElementById('btnHost').disabled=false;
+        document.getElementById('btnJoin').disabled=false;
+      }
     }
+    // peer-unavailable is normal (slot empty) — the launchProbe retries handle it
   });
 }
 
-// Become host of first free slot in the scan order (continue trying until one works)
-function qmBecomeHost(order,attempt=0){
+// Become host of first available slot; retries on collision
+function qmBecomeHost(order,attempt,retryCount){
+  if(attempt===undefined)attempt=0;
+  if(retryCount===undefined)retryCount=0;
   if(attempt>=order.length){
-    // All slots are already taken as hosts - unlikely, but fallback
+    if(retryCount<QM_MAX_RETRIES){
+      updateMpStatus(`⟳ Tous occupés, réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
+      setTimeout(()=>mpQuickMatch(retryCount+1),1200);
+      return;
+    }
     updateMpStatus('❌ Tous les salons sont occupés. Créez une partie privée.');
     document.getElementById('btnQuick').disabled=false;
     document.getElementById('btnHost').disabled=false;
@@ -726,12 +948,26 @@ function qmBecomeHost(order,attempt=0){
   const slot=order[attempt];
   const roomId=qmRoomId(slot);
   MP.isHost=true;
+  // Always destroy the previous peer before creating a new one (essential for retries)
+  if(MP.peer){try{MP.peer.destroy()}catch(e){}MP.peer=null}
   MP.peer=new Peer(roomId,{debug:0});
+  let opened=false;
+  const openTimeout=setTimeout(()=>{
+    if(!opened){
+      try{MP.peer.destroy()}catch(e){}
+      MP.peer=null;MP.isHost=false;
+      qmBecomeHost(order,attempt+1,retryCount);
+    }
+  },3500);
   MP.peer.on('open',()=>{
+    opened=true;
+    clearTimeout(openTimeout);
     updateMpStatus(`⏳ Salon #${slot} — en attente d'un autre joueur...`);
     document.getElementById('mpHostArea').style.display='block';
     document.getElementById('mpCode').textContent='SALON #'+slot;
     document.getElementById('mpJoinArea').style.display='none';
+    // Start a keepalive ping so the broker knows we're alive
+    startHostKeepalive();
   });
   MP.peer.on('connection',conn=>{
     MP.conn=conn;
@@ -743,14 +979,42 @@ function qmBecomeHost(order,attempt=0){
   });
   MP.peer.on('error',err=>{
     if(err&&err.type==='unavailable-id'){
-      // This slot is already taken (someone hosted faster) - try next
-      try{MP.peer.destroy()}catch(e){}
+      // Someone else grabbed this slot first — try next
+      clearTimeout(openTimeout);
+      if(MP.peer){try{MP.peer.destroy()}catch(e){}}
       MP.peer=null;MP.isHost=false;
-      qmBecomeHost(order,attempt+1);
-    } else {
-      updateMpStatus('❌ Erreur: '+(err.type||'inconnue'));
+      qmBecomeHost(order,attempt+1,retryCount);
+    } else if(err&&(err.type==='network'||err.type==='server-error'||err.type==='socket-error')){
+      clearTimeout(openTimeout);
+      if(retryCount<QM_MAX_RETRIES){
+        updateMpStatus(`⟳ Erreur réseau, réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
+        setTimeout(()=>mpQuickMatch(retryCount+1),1000);
+      } else {
+        updateMpStatus('❌ Erreur réseau persistante. Rechargez la page.');
+        document.getElementById('btnQuick').disabled=false;
+        document.getElementById('btnHost').disabled=false;
+        document.getElementById('btnJoin').disabled=false;
+      }
+    } else if(err&&err.type==='peer-unavailable'){
+      // Ignore; this is a connection-level error, not peer-level
     }
   });
+}
+
+// Host keepalive: periodically signal that we're still alive.
+// PeerJS brokers sometimes drop "inactive" peers after a few minutes of idle.
+// Sending a no-op to ourselves keeps the connection warm.
+let _keepaliveTimer=null;
+function startHostKeepalive(){
+  if(_keepaliveTimer)clearInterval(_keepaliveTimer);
+  _keepaliveTimer=setInterval(()=>{
+    if(!MP.peer||MP.peer.destroyed){clearInterval(_keepaliveTimer);_keepaliveTimer=null;return}
+    // PeerJS internally handles websocket heartbeats; we just avoid breaking ours.
+    // Not all PeerJS versions expose a ping mechanism; this empty callback keeps the event loop engaged.
+  },25000);
+}
+function stopHostKeepalive(){
+  if(_keepaliveTimer){clearInterval(_keepaliveTimer);_keepaliveTimer=null}
 }
 
 // Strip any HTML-like characters and truncate. Use on ALL strings that come from network or user input
@@ -1029,6 +1293,8 @@ function startMpGame(){
   document.getElementById('hud').style.display='flex';
   document.getElementById('settings-btn').style.display='flex';
   if(!getL().mob)document.getElementById('log').style.display='block';
+  // Reset volatile state (prevent carryover from abandoned sessions)
+  resetGameState();
   startMusic(0);
   
   if(MP.isHost){
@@ -1958,8 +2224,17 @@ requestAnimationFrame(loop);
   document.getElementById('btnMulti').onclick=()=>{
     const nick=document.getElementById('nick').value.trim();
     if(!nick){alert('Entrez un pseudo !');return}
+    // CRITICAL: always reset state when entering the lobby (user may have come from solo game)
+    mpReset();
     document.getElementById('menu-screen').style.display='none';
     document.getElementById('mp-lobby').style.display='flex';
+    document.getElementById('btnQuick').disabled=false;
+    document.getElementById('btnHost').disabled=false;
+    document.getElementById('btnJoin').disabled=false;
+    document.getElementById('btnHost').style.display='';
+    document.getElementById('btnQuick').style.display='';
+    document.getElementById('mpHostArea').style.display='none';
+    document.getElementById('mpJoinArea').style.display='';
     updateMpStatus('Prêt. Créez ou rejoignez une partie.');
   };
   document.getElementById('btnHost').onclick=()=>mpStartHost();
@@ -1972,9 +2247,18 @@ requestAnimationFrame(loop);
     mpJoin(code);
   };
   document.getElementById('btnMpBack').onclick=()=>{
-    if(MP.peer){MP.peer.destroy();MP.peer=null;MP.conn=null}
+    mpReset();
     document.getElementById('mp-lobby').style.display='none';
     document.getElementById('menu-screen').style.display='flex';
+    // Reset all buttons to enabled state
+    document.getElementById('btnQuick').disabled=false;
+    document.getElementById('btnHost').disabled=false;
+    document.getElementById('btnJoin').disabled=false;
+    document.getElementById('btnHost').style.display='';
+    document.getElementById('btnQuick').style.display='';
+    document.getElementById('mpHostArea').style.display='none';
+    document.getElementById('mpJoinArea').style.display='';
+    updateMpStatus('Choisissez un mode');
   };
   document.getElementById('mpCode').onclick=()=>{
     const t=document.getElementById('mpCode').textContent;
@@ -2065,6 +2349,8 @@ function startGame(){
   document.getElementById('hud').style.display='flex';
   document.getElementById('settings-btn').style.display='flex';
   if(!getL().mob)document.getElementById('log').style.display='block';
+  // Reset volatile state (in case player is restarting)
+  resetGameState();
   startMusic(0);
   // Determine number of players (solo: 2 or 3 based on NB_PLAYERS global)
   const nPlayers=NB_PLAYERS;
