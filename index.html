@@ -197,6 +197,52 @@ function genCode(){
   return c;
 }
 
+// ============================================================================
+// PeerJS server fallback
+// ============================================================================
+// The default 0.peerjs.com server is often overloaded or down.
+// We maintain a list of known public PeerJS-compatible servers and fall back
+// between them on connection failure.
+//
+// Servers:
+//   - 0.peerjs.com (default, port 443, secure) — PeerJS official
+//   - peerjs-server.herokuapp.com — alternative hosted server (if still up)
+//   - Custom self-hosted: replace with your own deployment URL
+//
+// To use YOUR OWN server (recommended for production):
+//   1. Deploy https://github.com/peers/peerjs-server on Render/Railway/Fly.io (free tier)
+//   2. Replace one of the entries below with {host:'your-server.example.com',port:443,path:'/',secure:true}
+// ============================================================================
+const PEER_SERVERS=[
+  // Try the default PeerJS cloud first
+  {host:'0.peerjs.com',port:443,path:'/',secure:true,key:'peerjs'},
+  // Fallback with legacy port (sometimes routes differently)
+  {host:'0.peerjs.com',port:443,path:'/peerjs',secure:true,key:'peerjs'},
+  // Final default (no options → PeerJS picks)
+  null
+];
+let _peerServerIdx=0;
+
+// Create a new Peer with the current server config. On error, we'll rotate to the next.
+function makePeer(id,extraOpts){
+  const cfg=PEER_SERVERS[_peerServerIdx];
+  const opts={debug:0,...(cfg||{}),...(extraOpts||{})};
+  try{
+    return id?new Peer(id,opts):new Peer(opts);
+  }catch(e){
+    // If this server's config is broken, rotate immediately
+    _peerServerIdx=(_peerServerIdx+1)%PEER_SERVERS.length;
+    return id?new Peer(id,{debug:0}):new Peer({debug:0});
+  }
+}
+
+// Rotate to the next server when the current one fails
+function rotatePeerServer(){
+  _peerServerIdx=(_peerServerIdx+1)%PEER_SERVERS.length;
+  const cfg=PEER_SERVERS[_peerServerIdx];
+  return cfg?`serveur ${cfg.host||'défaut'}`:'serveur alternatif';
+}
+
 function mpSend(type,data,targetConn){
   // If a specific connection is provided, send only to that one (used for per-client perspective-adjusted snapshots)
   if(targetConn){
@@ -642,7 +688,7 @@ function mpStartHost(retryCount){
   MP.myNick=sanitizeNick(document.getElementById('nick').value);
   updateMpStatus('Connexion au serveur PeerJS...');
   const code=genCode();
-  MP.peer=new Peer(code,{debug:0});
+  MP.peer=makePeer(code);
   let opened=false;
   const openTimeout=setTimeout(()=>{
     if(!opened){
@@ -698,10 +744,11 @@ function mpStartHost(retryCount){
     } else if(err&&(err.type==='network'||err.type==='server-error'||err.type==='socket-error')){
       clearTimeout(openTimeout);
       if(retryCount<QM_MAX_RETRIES){
-        updateMpStatus(`⟳ Erreur réseau, réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
+        const srvName=rotatePeerServer();
+        updateMpStatus(`⟳ Changement de serveur (${srvName}) — réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
         setTimeout(()=>mpStartHost(retryCount+1),1000);
       } else {
-        updateMpStatus('❌ '+(err.type||'erreur inconnue'));
+        updateMpStatus('❌ Tous les serveurs sont indisponibles.');
       }
     } else {
       updateMpStatus('❌ Erreur: '+(err.type||'inconnue'));
@@ -717,7 +764,7 @@ function mpJoin(code,retryCount){
   code=String(code||'').replace(/[^A-Za-z0-9]/g,'').toUpperCase().slice(0,12);
   if(!code){updateMpStatus('❌ Code invalide');return}
   updateMpStatus('Connexion à '+code+'...');
-  MP.peer=new Peer({debug:0});
+  MP.peer=makePeer();
   let connOpened=false;
   let peerOpened=false;
   const overallTimeout=setTimeout(()=>{
@@ -827,7 +874,7 @@ function mpQuickMatch(retryCount){
 
 // Probe multiple slots in parallel using a single peer. First successful connection wins.
 function qmParallelProbe(order,retryCount){
-  const proberPeer=new Peer({debug:0});
+  const proberPeer=makePeer();
   let resolved=false;
   const probes=[];  // Active connections being tested
   let probeIdx=0;   // Next slot to try
@@ -916,10 +963,12 @@ function qmParallelProbe(order,retryCount){
       cleanup();
       try{proberPeer.destroy()}catch(e){}
       if(retryCount<QM_MAX_RETRIES){
-        updateMpStatus(`⟳ Réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
+        // Rotate to next PeerJS server configuration
+        const srvName=rotatePeerServer();
+        updateMpStatus(`⟳ Changement de serveur (${srvName}) — réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
         setTimeout(()=>mpQuickMatch(retryCount+1),800);
       } else {
-        updateMpStatus('❌ Erreur réseau. Vérifiez votre connexion.');
+        updateMpStatus('❌ Tous les serveurs sont indisponibles. Essayez plus tard.');
         document.getElementById('btnQuick').disabled=false;
         document.getElementById('btnHost').disabled=false;
         document.getElementById('btnJoin').disabled=false;
@@ -950,7 +999,7 @@ function qmBecomeHost(order,attempt,retryCount){
   MP.isHost=true;
   // Always destroy the previous peer before creating a new one (essential for retries)
   if(MP.peer){try{MP.peer.destroy()}catch(e){}MP.peer=null}
-  MP.peer=new Peer(roomId,{debug:0});
+  MP.peer=makePeer(roomId);
   let opened=false;
   const openTimeout=setTimeout(()=>{
     if(!opened){
@@ -966,8 +1015,8 @@ function qmBecomeHost(order,attempt,retryCount){
     document.getElementById('mpHostArea').style.display='block';
     document.getElementById('mpCode').textContent='SALON #'+slot;
     document.getElementById('mpJoinArea').style.display='none';
-    // Start a keepalive ping so the broker knows we're alive
-    startHostKeepalive();
+    // Start keepalive + periodic scan for other lonely hosts
+    startHostKeepalive(slot);
   });
   MP.peer.on('connection',conn=>{
     MP.conn=conn;
@@ -987,10 +1036,11 @@ function qmBecomeHost(order,attempt,retryCount){
     } else if(err&&(err.type==='network'||err.type==='server-error'||err.type==='socket-error')){
       clearTimeout(openTimeout);
       if(retryCount<QM_MAX_RETRIES){
-        updateMpStatus(`⟳ Erreur réseau, réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
+        const srvName=rotatePeerServer();
+        updateMpStatus(`⟳ Changement de serveur (${srvName}) — réessai ${retryCount+1}/${QM_MAX_RETRIES}...`);
         setTimeout(()=>mpQuickMatch(retryCount+1),1000);
       } else {
-        updateMpStatus('❌ Erreur réseau persistante. Rechargez la page.');
+        updateMpStatus('❌ Tous les serveurs PeerJS sont HS. Rechargez la page plus tard.');
         document.getElementById('btnQuick').disabled=false;
         document.getElementById('btnHost').disabled=false;
         document.getElementById('btnJoin').disabled=false;
@@ -1001,20 +1051,109 @@ function qmBecomeHost(order,attempt,retryCount){
   });
 }
 
-// Host keepalive: periodically signal that we're still alive.
-// PeerJS brokers sometimes drop "inactive" peers after a few minutes of idle.
-// Sending a no-op to ourselves keeps the connection warm.
+// Host keepalive + periodic scan for lonely hosts in other slots.
+// When two players click quickmatch around the same time, they both become hosts in
+// different slots. Without intervention, they'd never find each other.
+// Solution: each host periodically probes other slots. If it finds another host in a
+// LOWER-numbered slot, it abandons its own slot and joins the other host.
+// Rule (stable tiebreaker): the host with the HIGHER slot number is the "joiner".
+// This guarantees only one of the two migrates, avoiding infinite loops.
 let _keepaliveTimer=null;
-function startHostKeepalive(){
+let _hostScanTimer=null;
+let _hostMySlot=null;
+function startHostKeepalive(slot){
   if(_keepaliveTimer)clearInterval(_keepaliveTimer);
+  if(_hostScanTimer)clearInterval(_hostScanTimer);
+  _hostMySlot=slot;
   _keepaliveTimer=setInterval(()=>{
     if(!MP.peer||MP.peer.destroyed){clearInterval(_keepaliveTimer);_keepaliveTimer=null;return}
-    // PeerJS internally handles websocket heartbeats; we just avoid breaking ours.
-    // Not all PeerJS versions expose a ping mechanism; this empty callback keeps the event loop engaged.
+    // PeerJS internally handles websocket heartbeats
   },25000);
+  // Scan for other hosts every 3 seconds while waiting
+  _hostScanTimer=setInterval(()=>{
+    // Only scan while we're still waiting for a connection (no client joined yet)
+    if(!MP.peer||MP.peer.destroyed){clearInterval(_hostScanTimer);_hostScanTimer=null;return}
+    if(MP.conns&&MP.conns.length>0){
+      // A client connected — stop scanning
+      clearInterval(_hostScanTimer);_hostScanTimer=null;return;
+    }
+    scanForLonelyHost();
+  },3000);
 }
 function stopHostKeepalive(){
   if(_keepaliveTimer){clearInterval(_keepaliveTimer);_keepaliveTimer=null}
+  if(_hostScanTimer){clearInterval(_hostScanTimer);_hostScanTimer=null}
+  _hostMySlot=null;
+}
+
+// Scan slots BELOW our current slot to see if another host is waiting alone.
+// If we find one, we abandon our slot and join theirs.
+function scanForLonelyHost(){
+  if(_hostMySlot===null||_hostMySlot===undefined)return;
+  // Only scan slots LOWER than ours (so we're the one who migrates, never both)
+  const slotsToTry=[];
+  for(let s=1;s<_hostMySlot;s++)slotsToTry.push(s);
+  if(slotsToTry.length===0)return; // We're in slot 1; we can't migrate down
+  // Shuffle slightly to avoid thundering-herd on slot 1
+  shuf(slotsToTry);
+  // Try up to 3 random lower slots per scan cycle (keep bandwidth modest)
+  const tryCount=Math.min(3,slotsToTry.length);
+  for(let i=0;i<tryCount;i++){
+    probeSlotForHost(slotsToTry[i]);
+  }
+}
+
+// Probe a single slot to check if a lonely host is waiting there.
+// If yes, migrate (destroy our host peer, join theirs).
+let _migrationInFlight=false;
+function probeSlotForHost(slot){
+  if(_migrationInFlight)return;
+  if(!MP.peer||MP.peer.destroyed)return;
+  // Use a lightweight temporary peer for probing
+  const probePeer=makePeer();
+  let done=false;
+  const finalize=()=>{
+    if(done)return;done=true;
+    try{probePeer.destroy()}catch(e){}
+  };
+  const timeout=setTimeout(finalize,1500);
+  probePeer.on('open',()=>{
+    if(!MP.peer||MP.peer.destroyed||MP.conns.length>0){finalize();return}
+    const roomId=qmRoomId(slot);
+    const conn=probePeer.connect(roomId,{reliable:true});
+    conn.on('open',()=>{
+      clearTimeout(timeout);
+      if(_migrationInFlight||!MP.peer||MP.peer.destroyed||MP.conns.length>0){
+        try{conn.close()}catch(e){}
+        finalize();
+        return;
+      }
+      // FOUND a lonely host in a lower slot! Migrate.
+      _migrationInFlight=true;
+      // Close our own host peer (abandon our slot so other players can take it)
+      try{MP.peer.destroy()}catch(e){}
+      MP.peer=null;
+      MP.isHost=false;
+      stopHostKeepalive();
+      // Promote probePeer to our main peer
+      MP.peer=probePeer;
+      MP.conn=conn;
+      MP.conns=[conn];
+      updateMpStatus(`✅ Fusion avec salon #${slot} — adversaire trouvé !`);
+      document.getElementById('mpHostArea').style.display='none';
+      // Send hello so the other host registers us as their opponent
+      mpSend('hello',{nick:MP.myNick});
+      conn.on('data',mpOnMessage);
+      conn.on('close',()=>handleOpponentDisconnect());
+      _migrationInFlight=false;
+    });
+    conn.on('error',()=>{
+      clearTimeout(timeout);finalize();
+    });
+  });
+  probePeer.on('error',()=>{
+    clearTimeout(timeout);finalize();
+  });
 }
 
 // Strip any HTML-like characters and truncate. Use on ALL strings that come from network or user input
