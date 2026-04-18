@@ -185,7 +185,11 @@ const MP={
   quickQueue:false
 };
 
-const QUICK_MATCH_ROOM='SERVICECOMPRIS_QUICKMATCH_V1';
+// Quick match: pool of numbered rooms to avoid everyone converging on one slot.
+// Each room can host at most 1 game. When joining, we try slots sequentially.
+const QUICK_MATCH_PREFIX='SCOMPRIS_QM_V2_SLOT_';
+const QUICK_MATCH_POOL_SIZE=20; // Up to 20 simultaneous matches
+function qmRoomId(slot){return QUICK_MATCH_PREFIX+slot}
 
 function genCode(){
   const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -644,57 +648,107 @@ function mpQuickMatch(){
   document.getElementById('btnQuick').disabled=true;
   document.getElementById('btnHost').disabled=true;
   document.getElementById('btnJoin').disabled=true;
-  
-  // Try to join quick match room first
-  const tempPeer=new Peer({debug:1});
-  let attemptedJoin=false;
-  tempPeer.on('open',myId=>{
-    const conn=tempPeer.connect(QUICK_MATCH_ROOM,{reliable:true});
-    const timeout=setTimeout(()=>{
-      // No one's hosting — become the host
-      if(!attemptedJoin){
-        tempPeer.destroy();
-        MP.isHost=true;
-        MP.peer=new Peer(QUICK_MATCH_ROOM,{debug:1});
-        MP.peer.on('open',()=>{
-          updateMpStatus('⏳ En attente d\'un autre joueur...');
-          document.getElementById('mpHostArea').style.display='block';
-          document.getElementById('mpCode').textContent='QUICKMATCH';
-          document.getElementById('mpJoinArea').style.display='none';
-        });
-        MP.peer.on('connection',conn=>{
-          MP.conn=conn;
-          conn.on('open',()=>mpSend('hello',{nick:MP.myNick}));
-          conn.on('data',mpOnMessage);
-          conn.on('close',()=>handleOpponentDisconnect());
-        });
-        MP.peer.on('error',err=>{
-          if(err.type==='unavailable-id'){
-            // Someone else took the slot - retry joining
-            setTimeout(mpQuickMatch,500);
-          }
-        });
-      }
-    },2500);
+  // Randomize the scanning start to spread users across slots
+  // and reduce collision likelihood.
+  const startSlot=1+Math.floor(Math.random()*QUICK_MATCH_POOL_SIZE);
+  const order=[];
+  for(let i=0;i<QUICK_MATCH_POOL_SIZE;i++){
+    order.push(((startSlot-1+i)%QUICK_MATCH_POOL_SIZE)+1);
+  }
+  qmScanSlots(order,0);
+}
+
+// Attempt to join slot order[idx]. On failure, move to the next.
+// If all fail (no existing hosts), become host of the first slot we tried (or the lowest free).
+function qmScanSlots(order,idx){
+  if(idx>=order.length){
+    // No existing host found — become a host ourselves
+    qmBecomeHost(order);
+    return;
+  }
+  const slot=order[idx];
+  const roomId=qmRoomId(slot);
+  updateMpStatus(`⚡ Recherche… (${idx+1}/${order.length})`);
+  const tempPeer=new Peer({debug:0});
+  let resolved=false;
+  const moveNext=()=>{
+    if(resolved)return;
+    resolved=true;
+    try{tempPeer.destroy()}catch(e){}
+    qmScanSlots(order,idx+1);
+  };
+  const timeout=setTimeout(moveNext,1800);
+  tempPeer.on('open',()=>{
+    const conn=tempPeer.connect(roomId,{reliable:true});
     conn.on('open',()=>{
-      attemptedJoin=true;
+      if(resolved){try{conn.close()}catch(e){}return}
+      resolved=true;
       clearTimeout(timeout);
       tempPeer._isQuick=true;
       MP.isHost=false;
       MP.peer=tempPeer;
       MP.conn=conn;
+      MP.conns=[conn];
       updateMpStatus('✅ Adversaire trouvé !');
       mpSend('hello',{nick:MP.myNick});
       conn.on('data',mpOnMessage);
-      conn.on('close',()=>alert('Adversaire déconnecté'));
+      conn.on('close',()=>handleOpponentDisconnect());
     });
     conn.on('error',()=>{
-      // No quick match host available
+      clearTimeout(timeout);moveNext();
     });
   });
-  tempPeer.on('error',err=>{
-    if(!attemptedJoin){
-      // Becoming host
+  tempPeer.on('error',(err)=>{
+    if(err&&err.type==='peer-unavailable'){
+      // Host doesn't exist for this slot — try next
+      clearTimeout(timeout);moveNext();
+    } else if(err&&err.type==='network'){
+      clearTimeout(timeout);
+      resolved=true;
+      updateMpStatus('❌ Erreur réseau — réessayez');
+      document.getElementById('btnQuick').disabled=false;
+      document.getElementById('btnHost').disabled=false;
+      document.getElementById('btnJoin').disabled=false;
+    }
+  });
+}
+
+// Become host of first free slot in the scan order (continue trying until one works)
+function qmBecomeHost(order,attempt=0){
+  if(attempt>=order.length){
+    // All slots are already taken as hosts - unlikely, but fallback
+    updateMpStatus('❌ Tous les salons sont occupés. Créez une partie privée.');
+    document.getElementById('btnQuick').disabled=false;
+    document.getElementById('btnHost').disabled=false;
+    document.getElementById('btnJoin').disabled=false;
+    return;
+  }
+  const slot=order[attempt];
+  const roomId=qmRoomId(slot);
+  MP.isHost=true;
+  MP.peer=new Peer(roomId,{debug:0});
+  MP.peer.on('open',()=>{
+    updateMpStatus(`⏳ Salon #${slot} — en attente d'un autre joueur...`);
+    document.getElementById('mpHostArea').style.display='block';
+    document.getElementById('mpCode').textContent='SALON #'+slot;
+    document.getElementById('mpJoinArea').style.display='none';
+  });
+  MP.peer.on('connection',conn=>{
+    MP.conn=conn;
+    if(!MP.conns)MP.conns=[];
+    MP.conns.push(conn);
+    conn.on('open',()=>mpSend('hello',{nick:MP.myNick},conn));
+    conn.on('data',mpOnMessage);
+    conn.on('close',()=>handleOpponentDisconnect());
+  });
+  MP.peer.on('error',err=>{
+    if(err&&err.type==='unavailable-id'){
+      // This slot is already taken (someone hosted faster) - try next
+      try{MP.peer.destroy()}catch(e){}
+      MP.peer=null;MP.isHost=false;
+      qmBecomeHost(order,attempt+1);
+    } else {
+      updateMpStatus('❌ Erreur: '+(err.type||'inconnue'));
     }
   });
 }
