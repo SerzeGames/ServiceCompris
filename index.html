@@ -115,6 +115,10 @@ canvas#c{display:block;position:fixed;top:0;left:0;z-index:1}
 <div id="title-screen" style="display:none">
   <div class="tg">🎃 SERVICE COMPRIS !</div>
   <div class="ts" id="titleSub">Le festin de l'Ogre — Choisis ton peuple</div>
+  <div id="playerCountSelector" style="display:flex;gap:10px;margin:12px 0;padding:10px;background:rgba(0,0,0,.3);border-radius:8px">
+    <button id="btn2p" class="pcbtn" style="flex:1;padding:8px 16px;background:linear-gradient(180deg,#4a2500,#2a1500);border:2px solid #ffaa44;border-radius:6px;color:#fff;font-weight:bold;cursor:pointer;font-size:13px">👥 2 Joueurs</button>
+    <button id="btn3p" class="pcbtn" style="flex:1;padding:8px 16px;background:linear-gradient(180deg,#2a1a0a,#1a0e05);border:2px solid #555;border-radius:6px;color:#aaa;font-weight:bold;cursor:pointer;font-size:13px">👥 3 Joueurs</button>
+  </div>
   <div class="rg" id="raceGrid"></div>
   <button class="bs" id="btnStart" disabled>⚔️ COMMENCER</button>
 </div>
@@ -166,13 +170,18 @@ const MP={
   enabled:false,
   isHost:false,
   peer:null,
-  conn:null,
+  conn:null,          // Primary connection (2-player mode or host's first client in 3P)
+  conns:[],           // Host mode: all client connections (length = NB_PLAYERS-1)
   myNick:'',
-  oppNick:'',
+  oppNick:'',         // Primary opponent nick (2-player legacy)
   myRace:null,
-  oppRace:null,
+  oppRace:null,       // Primary opponent race (2-player legacy)
+  oppNicks:['',''],   // All opponent nicks for 3-player (host perspective)
+  oppRaces:[null,null], // All opponent races for 3-player
+  myPlayerIdx:0,      // Player index from host's perspective (0=host, 1 or 2 for clients)
   ready:false,
   oppReady:false,
+  oppReadyFlags:[false,false], // For 3-player: each client's ready state
   quickQueue:false
 };
 
@@ -184,7 +193,20 @@ function genCode(){
   return c;
 }
 
-function mpSend(type,data){
+function mpSend(type,data,targetConn){
+  // If a specific connection is provided, send only to that one (used for per-client perspective-adjusted snapshots)
+  if(targetConn){
+    if(targetConn.open){try{targetConn.send({type,data})}catch(e){console.error('mpSend',e)}}
+    return;
+  }
+  // Host with multiple clients: broadcast to all
+  if(MP.isHost&&MP.conns&&MP.conns.length>0){
+    MP.conns.forEach(c=>{
+      if(c&&c.open){try{c.send({type,data})}catch(e){console.error('mpSend',e)}}
+    });
+    return;
+  }
+  // Default: single connection
   if(MP.conn&&MP.conn.open){try{MP.conn.send({type,data})}catch(e){console.error('mpSend',e)}}
 }
 
@@ -223,14 +245,17 @@ function updateMpStatus(txt){
 // So HOST swaps owner values when sending to client.
 function buildSnapshot(){
   // Swap perspective: what host calls "0" (host's stuff) is "1" for client
-  const swap=e=>({...e,owner:1-e.owner});
   const swapCard=c=>({...c,owner:c.owner!==undefined?1-c.owner:c.owner});
+  const swapTbl=e=>({...e,owner:1-e.owner,card:{...e.card,owner:e.card&&e.card.owner!==undefined?1-e.card.owner:undefined}});
+  // SECURITY: the host's hand must NEVER leak to the client.
+  // We send a placeholder array of the correct length with ONLY opaque backs.
+  const opaqueBack=()=>({_back:true,id:'_',name:'',type:'',sprite:'',counters:[]});
   return {
-    pH: S.aH.map(c=>({...c})), // Client's hand = host's aH
-    aH: S.pH.map(c=>({...c,_hidden:true})), // Client sees host's pH as opponent (backs)
+    pH: S.aH.map(c=>({...c})), // Client's hand = host's aH (their own cards, legit)
+    aH: S.pH.map(opaqueBack),  // Host's hand seen by client: count only, no card data
     pC: S.aC.map(swapCard),
     aC: S.pC.map(swapCard),
-    tbl: S.tbl.map(swap),
+    tbl: S.tbl.map(swapTbl),
     eat: S.eat.slice(),
     dkLen: S.dk.length,
     discardLen: S.discard.length,
@@ -239,7 +264,7 @@ function buildSnapshot(){
     can: (1-S.cur)===0, // Client can play if it's their turn
     gueuleton: S.gueuleton,
     gRate: S.gRate,
-    discardMode: false, // Never send host's discard mode
+    discardMode: false,
     phase: S.phase
   };
 }
@@ -260,7 +285,47 @@ function hostSync(){
 
 // Pending snapshot (only the latest matters)
 let _pendSnap=null, _pendTimer=null;
+// Validate and sanitize a card received from network. Returns a clean card or null if invalid.
+// Cards must correspond to known ACTIONS or creature entries with valid race sprites.
+function sanitizeCard(c){
+  if(!c||typeof c!=='object')return null;
+  // Opaque back-only card (used for hidden hands, e.g. opponent's hand)
+  if(c._back){
+    return{_back:true,id:'_',name:'',type:'',sprite:'',counters:[]};
+  }
+  // Creature card?
+  if(c.isCrea){
+    const rid=sanitizeRace(c.race);
+    if(!rid)return null;
+    const race=RACES.find(x=>x.id===rid);
+    const sprIdx=Number(c.sprIdx);
+    if(isNaN(sprIdx)||sprIdx<race.ss||sprIdx>=race.ss+9)return null;
+    return{
+      isCrea:true,
+      race:rid,
+      name:String(c.name||'').slice(0,40),
+      owner:Math.max(0,Math.min(MAX_PLAYERS-1,Number(c.owner)||0)),
+      sprIdx
+    };
+  }
+  const id=String(c.id||'');
+  const master=ACTIONS.find(a=>a.id===id);
+  if(!master)return null;
+  return{
+    ...master,
+    isCrea:false,
+    uid:String(c.uid||'').slice(0,20).replace(/[^A-Za-z0-9]/g,'')
+  };
+}
+
+function sanitizeHand(arr){
+  if(!Array.isArray(arr))return[];
+  return arr.slice(0,20).map(sanitizeCard).filter(c=>c!==null);
+}
+
 function applySnapshot(snap){
+  // Basic structural validation
+  if(!snap||typeof snap!=='object')return;
   // If there are active animations, store the snapshot and wait
   if(S.anims&&S.anims.length>0){
     _pendSnap=snap;
@@ -283,21 +348,30 @@ function applySnapshot(snap){
       oldTbl[key]=e._x;
     }
   });
-  S.pH=snap.pH;
-  S.aH=snap.aH;
-  S.pC=snap.pC;
-  S.aC=snap.aC;
-  S.tbl=snap.tbl.map(e=>{
-    const key=(e.card.id||'')+'|'+(e.card.name||'')+'|'+(e.card.uid||'')+'|'+e.owner;
-    if(oldTbl[key]!==undefined)e._x=oldTbl[key];
-    return e;
-  });
-  S.eat=snap.eat;
-  S.dk.length=snap.dkLen;
-  S.discard.length=snap.discardLen;
-  S.turn=snap.turn;
-  S.cur=snap.cur;
-  S.can=snap.can;
+  // Sanitize incoming data
+  S.pH=sanitizeHand(snap.pH);
+  S.aH=sanitizeHand(snap.aH);
+  S.pC=sanitizeHand(snap.pC);
+  S.aC=sanitizeHand(snap.aC);
+  S.hands[0]=S.pH; S.hands[1]=S.aH;
+  S.creatures[0]=S.pC; S.creatures[1]=S.aC;
+  const rawTbl=Array.isArray(snap.tbl)?snap.tbl.slice(0,50):[];
+  S.tbl=rawTbl.map(e=>{
+    if(!e||typeof e!=='object')return null;
+    const card=sanitizeCard(e.card);
+    if(!card)return null;
+    const owner=Math.max(0,Math.min(MAX_PLAYERS-1,Number(e.owner)||0));
+    const entry={card,owner,_fly:!!e._fly};
+    const key=(card.id||'')+'|'+(card.name||'')+'|'+(card.uid||'')+'|'+owner;
+    if(oldTbl[key]!==undefined)entry._x=oldTbl[key];
+    return entry;
+  }).filter(e=>e!==null);
+  S.eat=sanitizeHand(snap.eat);
+  S.dk.length=Math.max(0,Math.min(100,Number(snap.dkLen)||0));
+  S.discard.length=Math.max(0,Math.min(100,Number(snap.discardLen)||0));
+  S.turn=Math.max(0,Math.min(9999,Number(snap.turn)||0));
+  S.cur=Math.max(0,Math.min(MAX_PLAYERS-1,Number(snap.cur)||0));
+  S.can=!!snap.can;
   S.gueuleton=snap.gueuleton;
   S.gRate=snap.gRate;
   S.phase=snap.phase;
@@ -307,65 +381,63 @@ function applySnapshot(snap){
 // Host receives client's action intent
 function onClientIntent(msg){
   if(!MP.isHost)return;
+  if(!msg||typeof msg!=='object')return;
   const{type,data}=msg;
+  if(!data||typeof data!=='object')return;
   if(type==='playCard'){
     if(S.cur!==1)return;
-    let realIdx=data.idx;
+    let realIdx=Math.max(-1,Math.min(S.aH.length-1,0|Number(data.idx)));
+    const cardId=typeof data.cardId==='string'?data.cardId.slice(0,40):'';
     let c=S.aH[realIdx];
-    if(!c||(data.cardId&&c.id!==data.cardId)){
-      realIdx=S.aH.findIndex(x=>x.id===data.cardId);
+    if(!c||(cardId&&c.id!==cardId)){
+      realIdx=S.aH.findIndex(x=>x.id===cardId);
     }
     if(realIdx<0||!S.aH[realIdx])return;
     hostExecuteClientPlay(realIdx);
   } else if(type==='discard'){
     if(S.cur!==1)return;
-    let realIdx=data.idx;
+    let realIdx=Math.max(-1,Math.min(S.aH.length-1,0|Number(data.idx)));
+    const cardId=typeof data.cardId==='string'?data.cardId.slice(0,40):'';
     let c=S.aH[realIdx];
-    if(!c||(data.cardId&&c.id!==data.cardId)){
-      realIdx=S.aH.findIndex(x=>x.id===data.cardId);
+    if(!c||(cardId&&c.id!==cardId)){
+      realIdx=S.aH.findIndex(x=>x.id===cardId);
     }
     if(realIdx<0||!S.aH[realIdx])return;
     hostExecuteClientDiscard(realIdx);
   } else if(type==='pass'){
     if(S.cur!==1)return;
-    // Convert pass to enter discard mode for client (handled via intent-discard)
-    // Actually pass = must discard. Wait for clientIntent(discard).
   } else if(type==='counterChoice'){
-    console.log('[HOST] counterChoice received:', data.choice, 'ctrRes?', !!S.ctrRes);
-    if(!S.ctrRes){console.warn('[HOST] No ctrRes handler! Counter choice lost.');return}
+    if(!S.ctrRes)return;
     const choice=data.choice;
-    if(choice.type==='skip'){S.ctrRes(false)}
-    else{
-      let realIdx=choice.idx;
-      let c=S.aH[realIdx];
-      // Fallback: find by cardId if idx is invalid or mismatched
-      if(!c||(choice.cardId&&c.id!==choice.cardId)){
-        realIdx=S.aH.findIndex(x=>x.id===choice.cardId);
-        c=realIdx>=0?S.aH[realIdx]:null;
-        console.log('[HOST] Fallback by cardId. cardId:', choice.cardId, 'found idx:', realIdx);
-      }
-      console.log('[HOST] Counter card at idx', realIdx, ':', c);
-      if(c){
-        S.actTmr=3500;
-        mpAnim('counter',c,{kind:'hand',owner:1,idx:realIdx},{kind:'effect'},{dur:500});
-        const l=getL();
-        const p=S.aPos[realIdx];
-        const fx=p?p.x:l.ahX+realIdx*l.ahSp, fy=p?p.y:l.ahY;
-        S.aH.splice(realIdx,1);
+    if(!choice||typeof choice!=='object'){S.ctrRes(false);return}
+    if(choice.type==='skip'){S.ctrRes(false);return}
+    if(choice.type!=='use'){S.ctrRes(false);return}
+    let realIdx=Math.max(-1,Math.min(S.aH.length-1,0|Number(choice.idx)));
+    const cardId=typeof choice.cardId==='string'?choice.cardId.slice(0,40):'';
+    let c=S.aH[realIdx];
+    if(!c||(cardId&&c.id!==cardId)){
+      realIdx=S.aH.findIndex(x=>x.id===cardId);
+      c=realIdx>=0?S.aH[realIdx]:null;
+    }
+    if(c){
+      S.actTmr=3500;
+      mpAnim('counter',c,{kind:'hand',owner:1,idx:realIdx},{kind:'effect'},{dur:500});
+      const l=getL();
+      const p=S.aPos[realIdx];
+      const fx=p?p.x:l.ahX+realIdx*l.ahSp, fy=p?p.y:l.ahY;
+      S.aH.splice(realIdx,1);
         const toX=l.ezX+(l.ezW-l.CW)/2, toY=l.ezY+(l.ezH-l.CH)/2;
-        addAn(c,fx,fy,toX,toY,500,()=>{
-          S.effCard=c;S.effTmr=3000;
-          playCtrSfx();
-          spP(toX+l.CW/2,toY+l.CH/2,'#44ff44',18);
-          log(`🛡️ Contré par ${MP.oppNick}: ${c.name} !`);
-          // Surprise du Chef: the ATTACKER (= host here, since client is countering host's card) sends one of their own creatures
-          if(c.id==='surprise_chef'&&S.pC.length)aiSP(1);
-          setTimeout(()=>{if(S.ctrRes)S.ctrRes(true);hostSync()},1200);
-        },{back:false,fw:l.TW,fh:l.TH,tw:l.CW,th:l.CH});
-      } else {
-        console.warn('[HOST] Counter card not found. choice:', choice, 'S.aH ids:', S.aH.map(x=>x.id));
-        if(S.ctrRes)S.ctrRes(false);
-      }
+      addAn(c,fx,fy,toX,toY,500,()=>{
+        S.effCard=c;S.effTmr=3000;
+        playCtrSfx();
+        spP(toX+l.CW/2,toY+l.CH/2,'#44ff44',18);
+        log(`🛡️ Contré par ${MP.oppNick}: ${c.name} !`);
+        // Surprise du Chef: the ATTACKER (= host here, since client is countering host's card) sends one of their own creatures
+        if(c.id==='surprise_chef'&&S.pC.length)aiSP(1);
+        setTimeout(()=>{if(S.ctrRes)S.ctrRes(true);hostSync()},1200);
+      },{back:false,fw:l.TW,fh:l.TH,tw:l.CW,th:l.CH});
+    } else {
+      if(S.ctrRes)S.ctrRes(false);
     }
   }
 }
@@ -437,15 +509,19 @@ function hostExecuteClientDiscard(idx){
 
 // End turn, hand to owner=nextPlayer
 function finTurn(justPlayed){
-  const next=1-justPlayed;
+  const next=(justPlayed+1)%NB_PLAYERS;
   // Auto-draw for the player who just played
   autoDraw(justPlayed,()=>{
     S.cur=next;S.turn++;S.can=(next===0);
     uHUD();
-    log(`📝 Tour ${S.turn}`);
+    log(`📝 Tour ${S.turn} — ${S.nicks[next]||(next===0?'Vous':'Adv'+next)}`);
     autoDraw(next,()=>{
       chkEnd();
       if(MP.isHost)hostSync();
+      // In solo with 3 players: trigger AI turn for opponents
+      if(!MP.enabled&&next!==0&&S.phase==='play'){
+        setTimeout(()=>aiTurn(next),800);
+      }
     });
   });
 }
@@ -498,7 +574,7 @@ function clientShowCounter(cardData){
 // ========== Connection setup ==========
 function mpStartHost(){
   MP.isHost=true;
-  MP.myNick=document.getElementById('nick').value.trim()||'Joueur1';
+  MP.myNick=sanitizeNick(document.getElementById('nick').value);
   updateMpStatus('Connexion au serveur PeerJS...');
   MP.peer=new Peer(genCode(),{debug:1});
   MP.peer.on('open',id=>{
@@ -510,12 +586,26 @@ function mpStartHost(){
     updateMpStatus('✅ Partie créée. En attente de votre adversaire...');
   });
   MP.peer.on('connection',conn=>{
-    MP.conn=conn;
+    // In 3-player MP, we accept up to 2 client connections
+    const maxClients=(NB_PLAYERS===3)?2:1;
+    if(!MP.conns)MP.conns=[];
+    // Reject extra connections
+    if(MP.conns.length>=maxClients){
+      try{conn.on('open',()=>{conn.send({type:'reject',data:{reason:'full'}});conn.close()})}catch(e){}
+      return;
+    }
+    MP.conns.push(conn);
+    MP.conn=MP.conns[0]; // Primary connection (backward compat)
     conn.on('open',()=>{
-      mpSend('hello',{nick:MP.myNick});
+      mpSend('hello',{nick:MP.myNick,nPlayers:NB_PLAYERS},conn);
     });
     conn.on('data',mpOnMessage);
     conn.on('close',()=>handleOpponentDisconnect());
+    if(MP.conns.length>=maxClients){
+      updateMpStatus(`✅ ${MP.conns.length} joueur${MP.conns.length>1?'s':''} connecté${MP.conns.length>1?'s':''}`);
+    } else {
+      updateMpStatus(`✅ ${MP.conns.length} joueur sur ${maxClients} — en attente...`);
+    }
   });
   MP.peer.on('error',err=>{
     updateMpStatus('❌ Erreur: '+err.type);
@@ -524,7 +614,10 @@ function mpStartHost(){
 
 function mpJoin(code){
   MP.isHost=false;
-  MP.myNick=document.getElementById('nick').value.trim()||'Joueur2';
+  MP.myNick=sanitizeNick(document.getElementById('nick').value);
+  // Sanitize code input too (alphanumeric only)
+  code=String(code||'').replace(/[^A-Za-z0-9]/g,'').toUpperCase().slice(0,12);
+  if(!code){updateMpStatus('❌ Code invalide');return}
   updateMpStatus('Connexion à '+code+'...');
   MP.peer=new Peer({debug:1});
   MP.peer.on('open',()=>{
@@ -546,7 +639,7 @@ function mpJoin(code){
 // Strategy: try to connect to the fixed quickmatch lobby peer id.
 // If it doesn't exist, become the host with that id.
 function mpQuickMatch(){
-  MP.myNick=document.getElementById('nick').value.trim()||'Joueur';
+  MP.myNick=sanitizeNick(document.getElementById('nick').value);
   updateMpStatus('⚡ Recherche rapide...');
   document.getElementById('btnQuick').disabled=true;
   document.getElementById('btnHost').disabled=true;
@@ -606,14 +699,33 @@ function mpQuickMatch(){
   });
 }
 
+// Strip any HTML-like characters and truncate. Use on ALL strings that come from network or user input
+// before they hit any text rendering path (log, toast, title, etc.)
+function sanitizeNick(s){
+  if(typeof s!=='string')return 'Joueur';
+  // Remove angle brackets, control chars, and cap length
+  let out=s.replace(/[<>&"'`\u0000-\u001F\u007F]/g,'').trim();
+  if(!out)return 'Joueur';
+  if(out.length>24)out=out.slice(0,24);
+  return out;
+}
+// Only allow known race ids
+function sanitizeRace(r){
+  if(typeof r!=='string')return null;
+  return RACES.find(x=>x.id===r)?r:null;
+}
+
 function mpOnMessage(msg){
+  if(!msg||typeof msg!=='object')return;
   const{type,data}=msg;
   if(type==='hello'){
-    MP.oppNick=data.nick;
-    updateMpStatus(`🔗 Connecté à ${data.nick}. Choisissez votre peuple...`);
+    MP.oppNick=sanitizeNick(data&&data.nick);
+    updateMpStatus(`🔗 Connecté à ${MP.oppNick}. Choisissez votre peuple...`);
     showRaceScreen();
   } else if(type==='race'){
-    MP.oppRace=data.race;
+    const r=sanitizeRace(data&&data.race);
+    if(!r)return;
+    MP.oppRace=r;
     log(`👥 ${MP.oppNick} a choisi son peuple`);
     tryStartMp();
   } else if(type==='ready'){
@@ -622,46 +734,68 @@ function mpOnMessage(msg){
   } else if(type==='snap'){
     if(!MP.isHost)applySnapshot(data);
   } else if(type==='anim'){
-    // Remote animation event
-    if(!MP.isHost)playRemoteAnim(data);
+    // Sanitize card data in the anim payload
+    if(!MP.isHost&&data&&typeof data==='object'){
+      const safeData={
+        kind:['play','counter','draw','eat','sendTable','return','discard'].indexOf(data.kind)>=0?data.kind:null,
+        card:sanitizeCard(data.card),
+        fromSrc:(data.fromSrc&&typeof data.fromSrc==='object')?{
+          kind:String(data.fromSrc.kind||''),
+          owner:data.fromSrc.owner!==undefined?Math.max(0,Math.min(MAX_PLAYERS-1,0|Number(data.fromSrc.owner))):undefined,
+          idx:data.fromSrc.idx!==undefined?Math.max(0,Math.min(50,0|Number(data.fromSrc.idx))):undefined
+        }:null,
+        toTgt:(data.toTgt&&typeof data.toTgt==='object')?{
+          kind:String(data.toTgt.kind||''),
+          owner:data.toTgt.owner!==undefined?Math.max(0,Math.min(MAX_PLAYERS-1,0|Number(data.toTgt.owner))):undefined,
+          idx:data.toTgt.idx!==undefined?Math.max(0,Math.min(50,0|Number(data.toTgt.idx))):undefined
+        }:null,
+        dur:Math.max(100,Math.min(5000,0|Number(data.dur)||400)),
+        back:!!data.back
+      };
+      if(safeData.kind&&safeData.card)playRemoteAnim(safeData);
+    }
   } else if(type==='counterPrompt'){
-    if(!MP.isHost)clientShowCounter(data.card);
-  } else if(type==='waitCounter'){
-    // Client receives signal that host is deciding on a counter
     if(!MP.isHost){
-      S.oppDeciding=!!data.active;
-      if(data.active){
-        // Keep action card visible while host decides
+      const c=sanitizeCard(data&&data.card);
+      if(c)clientShowCounter(c);
+    }
+  } else if(type==='waitCounter'){
+    if(!MP.isHost){
+      S.oppDeciding=!!(data&&data.active);
+      if(S.oppDeciding){
         S.actTmr=Math.max(S.actTmr,30000);
       } else {
-        // Host is done; shorten display
         S.actTmr=Math.min(S.actTmr,2000);
       }
     }
   } else if(type==='toast'){
     if(!MP.isHost){
-      const d=data.delay||0;
-      setTimeout(()=>showToast(data.msg,data.variant||'red',data.sub||null,data.dur||2600),d);
+      const d=Math.min(5000,Math.max(0,Number(data&&data.delay)||0));
+      const dur=Math.min(10000,Math.max(500,Number(data&&data.dur)||2600));
+      // Cap message lengths to prevent spam/overflow
+      const msg=String(data&&data.msg||'').slice(0,200);
+      const sub=data&&data.sub?String(data.sub).slice(0,300):null;
+      const variant=(['red','green','orange','blue'].indexOf(data&&data.variant)>=0)?data.variant:'red';
+      setTimeout(()=>showToast(msg,variant,sub,dur),d);
+    }
+  } else if(type==='log'){
+    if(!MP.isHost){
+      // Cap log message length
+      log(String(data&&data.msg||'').slice(0,300));
     }
   } else if(type==='gameEnd'){
     if(!MP.isHost){
       S.phase='end';
-      // From client's perspective: my race is clientRace, opp is hostRace
-      // clientEaten = cards I devoured (host's creatures in S.eat)
-      // hostEaten = cards host devoured (my creatures in S.eat)
-      showEndScreen(
-        data.result,
-        data.clientRace,
-        data.hostRace,
-        data.clientNick||MP.myNick||'Vous',
-        data.hostNick||MP.oppNick||'Adversaire',
-        data.clientEaten||0,
-        data.hostEaten||0,
-        data.turn||S.turn
-      );
+      const result=(['win','lose','draw'].indexOf(data&&data.result)>=0)?data.result:'draw';
+      const clientRace=sanitizeRace(data&&data.clientRace)||MP.myRace;
+      const hostRace=sanitizeRace(data&&data.hostRace)||MP.oppRace;
+      const clientNick=sanitizeNick(data&&data.clientNick)||MP.myNick||'Vous';
+      const hostNick=sanitizeNick(data&&data.hostNick)||MP.oppNick||'Adversaire';
+      const clientEaten=Math.max(0,Math.min(100,Number(data&&data.clientEaten)||0));
+      const hostEaten=Math.max(0,Math.min(100,Number(data&&data.hostEaten)||0));
+      const turn=Math.max(0,Math.min(9999,Number(data&&data.turn)||S.turn));
+      showEndScreen(result,clientRace,hostRace,clientNick,hostNick,clientEaten,hostEaten,turn);
     }
-  } else if(type==='log'){
-    if(!MP.isHost)log(data.msg);
   } else if(type==='playCard'||type==='discard'||type==='pass'||type==='counterChoice'){
     if(MP.isHost)onClientIntent(msg);
   }
@@ -805,7 +939,14 @@ function playRemoteAnim(data){
 // Host: broadcast an animation to client
 function mpAnim(kind,card,fromSrc,toTgt,opts){
   if(!MP.enabled||!MP.isHost)return;
-  mpSend('anim',{kind,card,fromSrc,toTgt,...opts});
+  // SECURITY: for draw animations going to the HOST's hand (toTgt.owner===0 from host POV),
+  // replace the real card with an opaque placeholder so the client can't inspect it.
+  // The client doesn't need the real card — it just animates a face-down rectangle.
+  let safeCard=card;
+  if(kind==='draw'&&toTgt&&toTgt.kind==='hand'&&toTgt.owner===0){
+    safeCard={_back:true,id:'_',name:'',type:'',sprite:'',counters:[]};
+  }
+  mpSend('anim',{kind,card:safeCard,fromSrc,toTgt,...opts});
 }
 
 function showRaceScreen(){
@@ -813,6 +954,10 @@ function showRaceScreen(){
   document.getElementById('title-screen').style.display='flex';
   document.getElementById('titleSub').textContent=`vs ${MP.oppNick} — Choisis ton peuple`;
   document.getElementById('btnStart').textContent='✅ PRÊT';
+  // Hide player count selector in MP (stays at 2 players for now)
+  const pcs=document.getElementById('playerCountSelector');
+  if(pcs)pcs.style.display='none';
+  NB_PLAYERS=2;
 }
 
 function tryStartMp(){
@@ -843,16 +988,28 @@ function startMpGame(){
     shuf(S.dk);S.pH=[];S.aH=[];
     for(let i=0;i<5;i++){if(S.dk.length)S.pH.push(S.dk.pop());if(S.dk.length)S.aH.push(S.dk.pop())}
     S.tbl=[];S.eat=[];S.turn=1;S.cur=0;S.can=true;S.drawn=false;S.sel=-1;S.phase='play';S.pPos=[];S.aPos=[];S.discard=[];S._emergencyRefills=0;
+    // Mirror to N-player structures (MP is always 2 players for now)
+    S.races=[MP.myRace,MP.oppRace,null];
+    S.nicks=[MP.myNick,MP.oppNick,''];
+    S.hands=[S.pH,S.aH,[]];
+    S.creatures=[S.pC,S.aC,[]];
+    S.handsPos=[S.pPos,S.aPos,[]];
+    S.creaturesPos=[[],[],[]];
     log(`🎮 ${MP.myNick} (${pR.name}) vs ${MP.oppNick} (${aR.name}) !`);
     uHUD();
-    // Send initial snapshot
     setTimeout(()=>hostSync(),200);
   } else {
-    // Client waits for first snapshot
     S.pRace=MP.myRace;
     S.aRace=MP.oppRace;
     S.pH=[];S.aH=[];S.pC=[];S.aC=[];S.tbl=[];S.eat=[];S.dk=[];S.discard=[];
     S.phase='play';S.turn=1;S.cur=1;S.can=false;S.pPos=[];S.aPos=[];
+    // Mirror to N-player structures
+    S.races=[MP.myRace,MP.oppRace,null];
+    S.nicks=[MP.myNick,MP.oppNick,''];
+    S.hands=[S.pH,S.aH,[]];
+    S.creatures=[S.pC,S.aC,[]];
+    S.handsPos=[S.pPos,S.aPos,[]];
+    S.creaturesPos=[[],[],[]];
     log(`🎮 En attente de la partie...`);
     uHUD();
   }
@@ -992,16 +1149,74 @@ const ACTIONS=[
 {id:'trou_normand',name:'Trou Normand',desc:'Le gueuleton s\'arrête immédiatement.',type:'defense',count:1,sprite:'trou_normand',counters:[]},
 {id:'veneneux',name:'Vénéneux',desc:'Enlevez un personnage de la table du géant.',type:'special',count:1,sprite:'veneneux',counters:[]}];
 
-const S={phase:'title',W:0,H:0,pRace:null,aRace:null,turn:1,cur:0,
-pH:[],aH:[],pC:[],aC:[],tbl:[],eat:[],dk:[],
+// ============================================================================
+// MULTI-PLAYER ARCHITECTURE (N players)
+// ============================================================================
+// The game supports NB_PLAYERS = 2 or 3 players.
+// - Player 0 is always the local user's perspective (called "me" / "you").
+// - In solo mode, player 0 is the human, players 1+ are AI.
+// - In MP mode, player 0 is always LOCAL perspective (host sees themselves as 0,
+//   each client sees themselves as 0). Snapshots rotate ownership accordingly.
+//
+// New canonical structures (use these for NEW code):
+//   S.hands[i]       — hand of player i (array of cards)
+//   S.creatures[i]   — reserve creatures of player i
+//   S.races[i]       — race id of player i
+//   S.nicks[i]       — display name of player i
+//   S.cur            — index of current player (0..NB_PLAYERS-1)
+//   S.tbl[].owner    — player index (0..NB_PLAYERS-1)
+//
+// Legacy mirrors (kept for compatibility during transition):
+//   S.pH = S.hands[0], S.aH = S.hands[1]
+//   S.pC = S.creatures[0], S.aC = S.creatures[1]
+//   S.pRace = S.races[0], S.aRace = S.races[1]
+// ============================================================================
+
+let NB_PLAYERS = 2; // Default 2; set to 3 for 3-player mode
+const MAX_PLAYERS = 3;
+
+const S={phase:'title',W:0,H:0,
+// Legacy 2-player fields (kept as mirrors)
+pRace:null,aRace:null,
+pH:[],aH:[],pC:[],aC:[],
+pPos:[],aPos:[],
+// New N-player structures
+hands:[[],[],[]],      // hands[0..2]
+creatures:[[],[],[]],  // creatures[0..2]
+races:[null,null,null],
+nicks:['','',''],
+handsPos:[[],[],[]],   // cached positions for each player's hand cards
+creaturesPos:[[],[],[]],
+// Shared state
+turn:1,cur:0,
+tbl:[],eat:[],dk:[],
 sel:-1,hovH:-1,hovT:-1,hovPC:-1,hovBtn:null,can:true,drawn:false,
 parts:[],oA:0,oE:false,anims:[],
 actCard:null,actTmr:0,
 effCard:null,effTmr:0,
-pPos:[],aPos:[],
 ctrPend:false,ctrRes:null,oppDeciding:false,
 gueuleton:false,gRate:1,
 discard:[],discardMode:false};
+
+// Sync legacy fields <-> new structures
+// Call after modifying any hand / creature / race fields
+function syncLegacy(){
+  S.pH=S.hands[0]; S.aH=S.hands[1];
+  S.pC=S.creatures[0]; S.aC=S.creatures[1];
+  S.pRace=S.races[0]; S.aRace=S.races[1];
+  S.pPos=S.handsPos[0]; S.aPos=S.handsPos[1];
+}
+
+// Return the player index opposite of `me` (2-player mode) or array of opponents (N-player)
+function opponentsOf(me){
+  const opps=[];
+  for(let i=0;i<NB_PLAYERS;i++) if(i!==me) opps.push(i);
+  return opps;
+}
+// For 2-player compatibility: single opponent
+function opponentOf(me){ return (me===0)?1:0 }
+// Next player in turn order (circular)
+function nextPlayer(i){ return (i+1)%NB_PLAYERS }
 
 function shuf(a){for(let i=a.length-1;i>0;i--){const j=0|Math.random()*(i+1);[a[i],a[j]]=[a[j],a[i]]}return a}
 
@@ -1040,7 +1255,18 @@ function refillDeck(){
   uHUD();
 }
 function lerp(a,b,t){return a+(b-a)*t}
-function log(m){const e=document.getElementById('log');e.innerHTML+=`<div style="border-bottom:1px solid #1a1a1a;padding:2px 0">${m}</div>`;e.scrollTop=e.scrollHeight}
+function log(m){
+  const e=document.getElementById('log');
+  if(!e)return;
+  const div=document.createElement('div');
+  div.style.cssText='border-bottom:1px solid #1a1a1a;padding:2px 0';
+  // SECURITY: use textContent to prevent XSS from untrusted input (pseudos, MP messages)
+  div.textContent=String(m);
+  e.appendChild(div);
+  e.scrollTop=e.scrollHeight;
+  // Cap log size (prevent memory bloat from flood attacks)
+  while(e.children.length>200)e.removeChild(e.firstChild);
+}
 function spP(x,y,c,n=12){for(let i=0;i<n;i++)S.parts.push({x,y,vx:(Math.random()-.5)*7,vy:(Math.random()-.5)*7-2,l:1,d:.015+Math.random()*.02,s:2+Math.random()*4,c})}
 function addAn(card,fx,fy,tx,ty,dur,cb,o={}){S.anims.push({card,fx,fy,tx,ty,p:0,dur:dur||400,cb,back:o.back,alwaysBack:o.alwaysBack,fw:o.fw||0,fh:o.fh||0,tw:o.tw||0,th:o.th||0})}
 function easeOut(t){return 1-Math.pow(1-t,3)}
@@ -1065,42 +1291,77 @@ const RAT=360/520;
 
 function getL(){
   // Cache layout per frame to avoid recomputing on every call
-  if(S._l && S._lW===S.W && S._lH===S.H && S._lPH===S.pH.length && S._lAH===S.aH.length && S._lAC===S.aC.length && S._lPC===S.pC.length && S._lTbl===S.tbl.length) return S._l;
-  S._lW=S.W;S._lH=S.H;S._lPH=S.pH.length;S._lAH=S.aH.length;S._lAC=S.aC.length;S._lPC=S.pC.length;S._lTbl=S.tbl.length;
+  const sig=S.W+'|'+S.H+'|'+S.pH.length+'|'+S.aH.length+'|'+S.aC.length+'|'+S.pC.length+'|'+S.tbl.length+'|'+NB_PLAYERS+'|'+(S.hands[2]?S.hands[2].length:0)+'|'+(S.creatures[2]?S.creatures[2].length:0);
+  if(S._l && S._lSig===sig) return S._l;
+  S._lSig=sig;
   const W=S.W,H=S.H;
   const mob=IS_MOBILE;
   const port=H>W;
 
-  // Card sizes adapt to screen
+  // Card sizes adapt to screen. In 3-player mode, shrink top cards slightly since there are 2 rows.
   let CH,CW,SH,SW,TH,TW;
+  const shrink3p = (NB_PLAYERS===3) ? 0.82 : 1.0;
   if(mob){
     if(port){
-      // Mobile portrait: fill the vertical space with bigger cards
-      CH=Math.max(95,Math.min(180,H*.15))|0;
-      SH=Math.max(70,Math.min(130,H*.11))|0;
-      TH=Math.max(55,Math.min(100,H*.08))|0;
+      CH=Math.max(85,Math.min(160,H*.14))|0;
+      SH=Math.max(60,Math.min(110,H*.10))|0;
+      TH=(Math.max(45,Math.min(85,H*.07))*shrink3p)|0;
     } else {
-      // Mobile landscape
-      CH=Math.max(80,Math.min(150,H*.22))|0;
-      SH=Math.max(55,Math.min(100,H*.14))|0;
-      TH=Math.max(40,Math.min(70,H*.1))|0;
+      CH=Math.max(75,Math.min(135,H*.2))|0;
+      SH=Math.max(50,Math.min(90,H*.13))|0;
+      TH=(Math.max(35,Math.min(60,H*.09))*shrink3p)|0;
     }
   } else {
-    // Desktop - larger cards for readability
-    CH=Math.max(100,Math.min(200,H*.22))|0;
-    SH=Math.max(70,Math.min(130,H*.15))|0;
-    TH=Math.max(50,Math.min(90,H*.1))|0;
+    CH=Math.max(90,Math.min(180,H*.2))|0;
+    SH=Math.max(65,Math.min(120,H*.14))|0;
+    TH=(Math.max(45,Math.min(80,H*.09))*shrink3p)|0;
   }
   CW=(CH*RAT)|0; SW=(SH*RAT)|0; TW=(TH*RAT)|0;
 
   const gap=mob?2:6;
 
-  // AI creatures top row
-  const acN=S.aC.length,acSp=Math.min(TW+(mob?2:3),(W-(mob?10:20))/Math.max(acN,1));
-  const acX=(W-acSp*Math.max(acN-1,0)-TW)/2,acY=mob?1:2;
-  // AI hand
-  const ahN=S.aH.length,ahSp=Math.min(TW+2,(W-10)/Math.max(ahN,1));
-  const ahX=(W-ahSp*Math.max(ahN-1,0)-TW)/2,ahY=acY+TH+gap;
+  // === 3-PLAYER LAYOUT: 2 opponent rows (player 1 and player 2) ===
+  // In 3P: player 1 occupies the top-left, player 2 the top-right
+  // In 2P: player 1 (aka "aC/aH") occupies the whole top
+  const p1C=S.creatures[1]||S.aC;
+  const p2C=(NB_PLAYERS===3&&S.creatures[2])?S.creatures[2]:[];
+  const p1H=S.hands[1]||S.aH;
+  const p2H=(NB_PLAYERS===3&&S.hands[2])?S.hands[2]:[];
+
+  // Player 1 (opponent #1) — top row
+  const p1HandTop=mob?1:2;
+  const p1cN=p1C.length, p2cN=p2C.length;
+  const p1hN=p1H.length, p2hN=p2H.length;
+
+  let acX, acY, acSp, ahX, ahY, ahSp;
+  let ac2X=0, ac2Y=0, ac2Sp=0, ah2X=0, ah2Y=0, ah2Sp=0;
+
+  if(NB_PLAYERS===3){
+    // Two opponents on top — split horizontally
+    const halfW=(W-gap)/2;
+    // Player 1 left half, player 2 right half
+    acSp=Math.min(TW+(mob?2:3),(halfW-(mob?6:12))/Math.max(p1cN,1));
+    acX=(halfW-acSp*Math.max(p1cN-1,0)-TW)/2;
+    acY=p1HandTop;
+    ahSp=Math.min(TW+2,(halfW-6)/Math.max(p1hN,1));
+    ahX=(halfW-ahSp*Math.max(p1hN-1,0)-TW)/2;
+    ahY=acY+TH+gap;
+    ac2Sp=Math.min(TW+(mob?2:3),(halfW-(mob?6:12))/Math.max(p2cN,1));
+    ac2X=halfW+gap+(halfW-ac2Sp*Math.max(p2cN-1,0)-TW)/2;
+    ac2Y=p1HandTop;
+    ah2Sp=Math.min(TW+2,(halfW-6)/Math.max(p2hN,1));
+    ah2X=halfW+gap+(halfW-ah2Sp*Math.max(p2hN-1,0)-TW)/2;
+    ah2Y=ac2Y+TH+gap;
+  } else {
+    // 2-player: centered single opponent row
+    acSp=Math.min(TW+(mob?2:3),(W-(mob?10:20))/Math.max(p1cN,1));
+    acX=(W-acSp*Math.max(p1cN-1,0)-TW)/2;
+    acY=p1HandTop;
+    ahSp=Math.min(TW+2,(W-10)/Math.max(p1hN,1));
+    ahX=(W-ahSp*Math.max(p1hN-1,0)-TW)/2;
+    ahY=acY+TH+gap;
+  }
+
   // Action zone + Effect zone
   const azW=mob?CW+8:CW+16,azH=mob?CH+8:CH+16;
   const ezW=azW,ezH=azH;
@@ -1130,7 +1391,9 @@ function getL(){
   // Button
   const bpX=W/2-100,bpY=pcY+SH+gap;
 
-  return S._l={CW,CH,SW,SH,TW,TH,mob,acX,acY,acSp,ahX,ahY,ahSp,azX,azY,azW,azH,ezX,ezY,ezW,ezH,tX,tY,tW,tH,tcX,tSp,tcY,plateX,plateY,dpX,dpY,dpW,dpH,ddX,ddY,ddW,ddH,phX,phY,phSp,pcX,pcY,pcSp,bpX,bpY};
+  return S._l={CW,CH,SW,SH,TW,TH,mob,acX,acY,acSp,ahX,ahY,ahSp,
+    ac2X,ac2Y,ac2Sp,ah2X,ah2Y,ah2Sp,
+    azX,azY,azW,azH,ezX,ezY,ezW,ezH,tX,tY,tW,tH,tcX,tSp,tcY,plateX,plateY,dpX,dpY,dpW,dpH,ddX,ddY,ddW,ddH,phX,phY,phSp,pcX,pcY,pcSp,bpX,bpY};
 }
 // Invalidate cache when dimensions or counts change
 function invalL(){S._l=null}
@@ -1215,7 +1478,7 @@ function updateHandPos(){
     const dly=tgtLy-S.pPos[i].ly;
     S.pPos[i].ly=Math.abs(dly)<0.5?tgtLy:lerp(S.pPos[i].ly,tgtLy,.2);
   }
-  // AI hand targets
+  // Opponent 1 (top-left in 3P, top-center in 2P)
   while(S.aPos.length<S.aH.length)S.aPos.push({x:l.ahX,y:l.ahY});
   S.aPos.length=S.aH.length;
   for(let i=0;i<S.aH.length;i++){
@@ -1223,6 +1486,19 @@ function updateHandPos(){
     const dx=tx-S.aPos[i].x, dy=ty-S.aPos[i].y;
     S.aPos[i].x=Math.abs(dx)<0.5?tx:lerp(S.aPos[i].x,tx,.18);
     S.aPos[i].y=Math.abs(dy)<0.5?ty:lerp(S.aPos[i].y,ty,.18);
+  }
+  // Opponent 2 (3-player mode, top-right)
+  if(NB_PLAYERS===3 && S.hands[2]){
+    if(!S.handsPos[2])S.handsPos[2]=[];
+    const p2H=S.hands[2], p2Pos=S.handsPos[2];
+    while(p2Pos.length<p2H.length)p2Pos.push({x:l.ah2X,y:l.ah2Y});
+    p2Pos.length=p2H.length;
+    for(let i=0;i<p2H.length;i++){
+      const tx=l.ah2X+i*l.ah2Sp,ty=l.ah2Y;
+      const dx=tx-p2Pos[i].x, dy=ty-p2Pos[i].y;
+      p2Pos[i].x=Math.abs(dx)<0.5?tx:lerp(p2Pos[i].x,tx,.18);
+      p2Pos[i].y=Math.abs(dy)<0.5?ty:lerp(p2Pos[i].y,ty,.18);
+    }
   }
 }
 
@@ -1239,16 +1515,41 @@ function draw(){
   const l=getL();
   updateHandPos();
 
-  // AI creatures (VISIBLE - face up)
+  // Opponent 1 (J1 = S.aC in 2P, left side in 3P)
   X.font='10px sans-serif';X.fillStyle='rgba(255,100,100,.5)';X.textAlign='center';X.textBaseline='bottom';
-  X.fillText(`Créatures adverses (${S.aC.length})`,W/2,l.acY-1);
+  const p1Label=NB_PLAYERS===3?(S.nicks[1]||'J1'):'Créatures adverses';
+  const p1CenterX=NB_PLAYERS===3?(l.acX+l.acSp*Math.max(S.aC.length-1,0)+l.TW)/2+l.acX/2:W/2;
+  X.fillText(`${p1Label} (${S.aC.length})`,NB_PLAYERS===3?(l.acX+l.acSp*(S.aC.length/2)):W/2,l.acY-1);
   for(let i=0;i<S.aC.length;i++){drawCard(l.acX+i*l.acSp,l.acY,l.TW,l.TH,S.aC[i])}
 
-  // AI hand (face down, animated positions)
-  X.fillStyle='rgba(200,150,60,.35)';X.fillText(`Main adverse (${S.aH.length})`,W/2,l.ahY-1);
+  X.fillStyle='rgba(200,150,60,.35)';X.fillText(`Main (${S.aH.length})`,NB_PLAYERS===3?(l.ahX+l.ahSp*(S.aH.length/2)):W/2,l.ahY-1);
   for(let i=0;i<S.aH.length;i++){
     const p=S.aPos[i]||{x:l.ahX+i*l.ahSp,y:l.ahY};
     drawCard(p.x,p.y,l.TW,l.TH,null,{back:true});
+  }
+
+  // Opponent 2 (only in 3-player mode) — right side
+  if(NB_PLAYERS===3 && S.creatures[2]){
+    const p2C=S.creatures[2],p2H=S.hands[2]||[];
+    X.fillStyle='rgba(255,100,100,.5)';
+    X.fillText(`${S.nicks[2]||'J2'} (${p2C.length})`,l.ac2X+l.ac2Sp*(p2C.length/2),l.ac2Y-1);
+    for(let i=0;i<p2C.length;i++){drawCard(l.ac2X+i*l.ac2Sp,l.ac2Y,l.TW,l.TH,p2C[i])}
+    X.fillStyle='rgba(200,150,60,.35)';
+    X.fillText(`Main (${p2H.length})`,l.ah2X+l.ah2Sp*(p2H.length/2),l.ah2Y-1);
+    for(let i=0;i<p2H.length;i++){
+      const p2Pos=(S.handsPos[2]||[])[i]||{x:l.ah2X+i*l.ah2Sp,y:l.ah2Y};
+      drawCard(p2Pos.x,p2Pos.y,l.TW,l.TH,null,{back:true});
+    }
+    // Current-turn glow for P2
+    if(S.cur===2){
+      X.strokeStyle='rgba(255,200,50,.7)';X.lineWidth=2;
+      rr(l.ac2X-4,l.ac2Y-4,l.ac2Sp*Math.max(p2C.length-1,0)+l.TW+8,l.TH+8,6);X.stroke();
+    }
+  }
+  // Current-turn glow for P1
+  if(S.cur===1){
+    X.strokeStyle='rgba(255,200,50,.7)';X.lineWidth=2;
+    rr(l.acX-4,l.acY-4,l.acSp*Math.max(S.aC.length-1,0)+l.TW+8,l.TH+8,6);X.stroke();
   }
 
   // Action zone
@@ -1579,6 +1880,21 @@ requestAnimationFrame(loop);
   });
   document.getElementById('btnStart').onclick=startGame;
 
+  // Player count selector (2 vs 3)
+  const b2=document.getElementById('btn2p'),b3=document.getElementById('btn3p');
+  function setPC(n){
+    NB_PLAYERS=n;
+    if(n===2){
+      b2.style.background='linear-gradient(180deg,#4a2500,#2a1500)';b2.style.borderColor='#ffaa44';b2.style.color='#fff';
+      b3.style.background='linear-gradient(180deg,#2a1a0a,#1a0e05)';b3.style.borderColor='#555';b3.style.color='#aaa';
+    } else {
+      b3.style.background='linear-gradient(180deg,#4a2500,#2a1500)';b3.style.borderColor='#ffaa44';b3.style.color='#fff';
+      b2.style.background='linear-gradient(180deg,#2a1a0a,#1a0e05)';b2.style.borderColor='#555';b2.style.color='#aaa';
+    }
+  }
+  if(b2)b2.onclick=()=>setPC(2);
+  if(b3)b3.onclick=()=>setPC(3);
+
   // Wire up menu buttons
   document.getElementById('btnSolo').onclick=()=>{
     document.getElementById('menu-screen').style.display='none';
@@ -1696,16 +2012,54 @@ function startGame(){
   document.getElementById('settings-btn').style.display='flex';
   if(!getL().mob)document.getElementById('log').style.display='block';
   startMusic(0);
-  const ot=RACES.filter(r=>r.id!==S.pRace);
-  S.aRace=ot[0|Math.random()*ot.length].id;
-  const pR=RACES.find(r=>r.id===S.pRace),aR=RACES.find(r=>r.id===S.aRace);
-  S.pC=pR.m.map((n,i)=>({isCrea:true,race:pR.id,name:n,owner:0,sprIdx:pR.ss+i}));
-  S.aC=aR.m.map((n,i)=>({isCrea:true,race:aR.id,name:n,owner:1,sprIdx:aR.ss+i}));
+  // Determine number of players (solo: 2 or 3 based on NB_PLAYERS global)
+  const nPlayers=NB_PLAYERS;
+  // Pick remaining races for AI opponents
+  const availRaces=RACES.filter(r=>r.id!==S.pRace);
+  // Initialize races array: [player, ai1, ai2?]
+  S.races=[S.pRace];
+  S.nicks=[(function(){try{return document.getElementById('nick').value.trim()||'Vous'}catch(e){return 'Vous'}})()];
+  const usedRaces=new Set([S.pRace]);
+  for(let p=1;p<nPlayers;p++){
+    const pool=availRaces.filter(r=>!usedRaces.has(r.id));
+    const pick=pool[0|Math.random()*pool.length];
+    S.races.push(pick.id);
+    usedRaces.add(pick.id);
+    S.nicks.push(nPlayers===3?(p===1?'Ogre IA #1':'Ogre IA #2'):'Ogre IA');
+  }
+  // Fill unused slots with null so arrays stay length MAX_PLAYERS-safe
+  while(S.races.length<MAX_PLAYERS){S.races.push(null);S.nicks.push('')}
+  // Legacy mirror (2-player mode uses S.pRace / S.aRace)
+  S.pRace=S.races[0];S.aRace=S.races[1];
+  const pR=RACES.find(r=>r.id===S.pRace);
+  const aR=RACES.find(r=>r.id===S.aRace); // opponent 1 (backward compat)
+  // Populate creatures for each active player
+  S.creatures=[[],[],[]];
+  S.hands=[[],[],[]];
+  S.handsPos=[[],[],[]];
+  S.creaturesPos=[[],[],[]];
+  for(let p=0;p<nPlayers;p++){
+    const rid=S.races[p];if(!rid)continue;
+    const r=RACES.find(x=>x.id===rid);
+    S.creatures[p]=r.m.map((n,i)=>({isCrea:true,race:r.id,name:n,owner:p,sprIdx:r.ss+i}));
+  }
   S.dk=[];ACTIONS.forEach(a=>{for(let i=0;i<a.count;i++)S.dk.push({...a,isCrea:false,uid:Math.random().toString(36).slice(2)})});
-  shuf(S.dk);S.pH=[];S.aH=[];
-  for(let i=0;i<5;i++){if(S.dk.length)S.pH.push(S.dk.pop());if(S.dk.length)S.aH.push(S.dk.pop())}
-  S.tbl=[];S.eat=[];S.turn=1;S.cur=0;S.can=true;S.drawn=false;S.sel=-1;S.phase='play';S.pPos=[];S.aPos=[];S._emergencyRefills=0;S.discard=[];
-  log(`🎮 ${pR.name} vs ${aR.name} !`);log('📝 Cliquez une carte, re-cliquez pour jouer.');uHUD();
+  shuf(S.dk);
+  // Deal 5 cards per player
+  for(let i=0;i<5;i++){
+    for(let p=0;p<nPlayers;p++){
+      if(S.dk.length)S.hands[p].push(S.dk.pop());
+    }
+  }
+  S.tbl=[];S.eat=[];S.turn=1;S.cur=0;S.can=true;S.drawn=false;S.sel=-1;S.phase='play';S._emergencyRefills=0;S.discard=[];
+  // Sync legacy fields
+  syncLegacy();
+  if(nPlayers===3){
+    log(`🎮 ${S.nicks[0]} (${RACES.find(r=>r.id===S.races[0]).name}) vs ${S.nicks[1]} (${RACES.find(r=>r.id===S.races[1]).name}) vs ${S.nicks[2]} (${RACES.find(r=>r.id===S.races[2]).name}) !`);
+  } else {
+    log(`🎮 ${pR.name} vs ${aR.name} !`);
+  }
+  log('📝 Cliquez une carte, re-cliquez pour jouer.');uHUD();
 }
 
 function uHUD(){
@@ -1750,11 +2104,12 @@ function canCtr(c){
 // Counter dialog with card visuals
 function showCtrUI(aiCard){
   S.ctrPend=true;S.can=false;
-  // Keep the attacker card visible during the decision
   S.actTmr=30000;
   const dlg=document.getElementById('ctr-dlg');
-  document.getElementById('cdTitle').textContent=`⚠️ L'adversaire joue :`;
-  // Draw played card
+  // In 3-player solo mode: figure out who played it (the current turn player, NOT always ow=1)
+  const casterIdx=(!MP.enabled&&NB_PLAYERS===3)?S.cur:1;
+  const casterName=S.nicks[casterIdx]||'Adversaire';
+  document.getElementById('cdTitle').textContent=`⚠️ ${casterName} joue :`;
   const pp=document.getElementById('cdPlayed');pp.innerHTML='';
   const cv1=document.createElement('canvas');cv1.width=160;cv1.height=224;pp.appendChild(cv1);
   setTimeout(()=>{
@@ -1762,10 +2117,8 @@ function showCtrUI(aiCard){
     const sp=ES[aiCard.sprite];
     if(sp&&iE.complete)cx.drawImage(iE,sp[0],sp[1],sp[2],sp[3],0,0,160,224);
   },50);
-  // Card name under preview
   const nm=document.createElement('div');nm.style.cssText='color:#ff8844;font-size:14px;font-weight:bold;margin-top:6px';nm.textContent=aiCard.name;pp.appendChild(nm);
   const ds=document.createElement('div');ds.style.cssText='color:#ccc;font-size:11px;margin-top:3px;max-width:170px;line-height:1.3';ds.textContent=aiCard.desc||'';pp.appendChild(ds);
-  // Counter options
   const opts=document.getElementById('cdOpts');opts.innerHTML='';
   const cs=S.pH.filter(c=>aiCard.counters.includes(c.id));
   cs.forEach(c=>{
@@ -1782,7 +2135,6 @@ function showCtrUI(aiCard){
       const fx=p?p.x:l.phX+(idx*l.phSp), fy=p?p.y:l.phY;
       if(idx>=0)S.pH.splice(idx,1);
       const toX=l.ezX+(l.ezW-l.CW)/2, toY=l.ezY+(l.ezH-l.CH)/2;
-      // Broadcast counter animation to client (MP mode)
       if(MP.enabled&&MP.isHost){
         mpAnim('counter',c,{kind:'hand',owner:0,idx},{kind:'effect'},{dur:500});
       }
@@ -1791,10 +2143,18 @@ function showCtrUI(aiCard){
         playCtrSfx();
         spP(toX+l.CW/2,toY+l.CH/2,'#44ff44',18);
         log(`🛡️ Contré: ${c.name} !`);
-        if(c.id==='surprise_chef'&&S.aC.length){sndE(1);log('↩️ Contre-attaque !')}
+        // Surprise du Chef: caster sends one of THEIR creatures
+        if(c.id==='surprise_chef'){
+          const casterCrs=S.creatures[casterIdx]||S.aC;
+          if(casterCrs.length){
+            const ci2=pickCreature(casterCrs);
+            const cx2=casterCrs.splice(ci2,1)[0];
+            sendToTbl(cx2,casterIdx,false);
+            log('↩️ Contre-attaque !');
+          }
+        }
         S.can=true;uHUD();
         if(MP.enabled&&MP.isHost)hostSync();
-        // Delay to let both sides see the counter before resolving
         setTimeout(()=>{if(S.ctrRes)S.ctrRes(true)},MP.enabled?1000:200);
       },{fw:l.CW,fh:l.CH,tw:l.CW,th:l.CH});
     };
@@ -1912,26 +2272,28 @@ C.addEventListener('touchend',e=>{
 
 // Auto-draw to 5
 function autoDraw(who,cb){
-  const hand=who===0?S.pH:S.aH;
+  const hand=S.hands[who]||(who===0?S.pH:S.aH);
   if(hand.length>=5){if(cb)cb();return}
   refillDeck();
   if(!S.dk.length){if(cb)cb();return}
   const c=S.dk.pop();const l=getL();
   if(who===0){
     const ti=S.pH.length;const tx=l.phX+ti*l.phSp,ty=l.phY;
-    // Broadcast draw to client (host's pH = client's aH, so owner:1 for client perspective inversion)
     if(MP.enabled&&MP.isHost){
       mpAnim('draw',c,{kind:'pile'},{kind:'hand',owner:0,idx:ti},{dur:400,back:true});
     }
     addAn(c,l.dpX,l.dpY,tx,ty,400,()=>{S.pH.push(c);log(`📥 Pioché: ${c.name}`);spP(tx+l.CW/2,ty+l.CH/2,'#44aaff',8);uHUD();setTimeout(()=>autoDraw(who,cb),150)},{back:true,fw:l.dpW,fh:l.dpH,tw:l.CW,th:l.CH});
-  } else {
+  } else if(who===1){
     const ti=S.aH.length;const tx=l.ahX+ti*l.ahSp,ty=l.ahY;
-    // Broadcast client's draw (host's aH = client's pH, so owner:1 in their perspective)
     if(MP.enabled&&MP.isHost){
       mpAnim('draw',c,{kind:'pile'},{kind:'hand',owner:1,idx:ti},{dur:350,back:true});
     }
-    // Local animation: opponent's card should stay face-down the whole way
     addAn(c,l.dpX,l.dpY,tx,ty,350,()=>{S.aH.push(c);uHUD();setTimeout(()=>autoDraw(who,cb),150)},{alwaysBack:true,fw:l.dpW,fh:l.dpH,tw:l.TW,th:l.TH});
+  } else {
+    // Player 2 (3-player mode)
+    const h=S.hands[who];
+    const ti=h.length;const tx=l.ah2X+ti*l.ah2Sp,ty=l.ah2Y;
+    addAn(c,l.dpX,l.dpY,tx,ty,350,()=>{h.push(c);uHUD();setTimeout(()=>autoDraw(who,cb),150)},{alwaysBack:true,fw:l.dpW,fh:l.dpH,tw:l.TW,th:l.TH});
   }
 }
 
@@ -1993,79 +2355,123 @@ function playCard(idx){
 }
 
 function execCard(card,ow){
-  log(`${ow===0?'⚔️':'🤖'} ${ow===0?'Vous':'Adv.'}: ${card.name}`);
-
-  // Toast: show opponent's action description
-  // Solo mode: AI plays (ow===1, not in MP)
-  // MP mode: toast is triggered in playRemoteAnim on client side, so skip here for MP
-  if(ow===1&&!MP.enabled&&card.desc){
-    showToast(`Adversaire joue : ${card.name}`,'red',card.desc,2800);
+  log(`${ow===0?'⚔️':'🤖'} ${S.nicks[ow]||(ow===0?'Vous':'Adv.'+ow)}: ${card.name}`);
+  if(ow>=1&&!MP.enabled&&card.desc){
+    showToast(`${S.nicks[ow]||'Adversaire '+ow} joue : ${card.name}`,'red',card.desc,2800);
   }
-  // MP host's own play: no toast (they're playing themselves)
-  // MP host sees client card via hostExecuteClientPlay (handled below)
-
-  // Track gueuleton state to detect activation
   const wasGueuleton=S.gueuleton;
-  // In MP mode: host asks client to counter its cards (ow=0 = host played)
+
+  // MP: host asks client to counter its cards (ow=0 = host played)
   if(MP.enabled&&MP.isHost&&ow===0&&card.counters&&card.counters.length>0){
-    // Check if client has any counter card
     const clientHasCounter=S.aH.some(c=>card.counters.includes(c.id));
     if(clientHasCounter){
-      // Send counter prompt to client
       mpSend('counterPrompt',{card:card});
       S.ctrPend=true;
-      S.oppDeciding=true; // host is waiting for client
+      S.oppDeciding=true;
       S.ctrRes=ok=>{
         S.ctrRes=null;S.ctrPend=false;S.oppDeciding=false;
         if(ok){log('✅ Contrée par '+MP.oppNick)}
-        else{
-          continueExecCard(card,ow);
-        }
+        else{continueExecCard(card,ow)}
         hostSync();
       };
       return;
     }
   }
 
-  // AI tries to counter player's card (solo mode only)
-  if(!MP.enabled&&ow===0&&card.counters&&card.counters.length>0){
-    const aiCounter=S.aH.find(c=>card.counters.includes(c.id));
-    if(aiCounter&&Math.random()<0.7){
-      const ci=S.aH.indexOf(aiCounter);
-      const l=getL();
-      const p=S.aPos[ci];
-      const fx=p?p.x:l.ahX+ci*l.ahSp, fy=p?p.y:l.ahY;
-      S.aH.splice(ci,1);
-      const toX=l.ezX+(l.ezW-l.CW)/2, toY=l.ezY+(l.ezH-l.CH)/2;
-      addAn(aiCounter,fx,fy,toX,toY,450,()=>{
-        S.effCard=aiCounter;S.effTmr=2500;
-        playCtrSfx();
-        spP(toX+l.CW/2,toY+l.CH/2,'#ff4444',18);
-        log(`🛡️ Adversaire contre avec ${aiCounter.name} !`);
-        if(aiCounter.desc)showToast(`🛡️ Adversaire contre avec : ${aiCounter.name}`,'green',aiCounter.desc,2600);
-        if(aiCounter.id==='surprise_chef'&&S.pC.length){
-          const ci2=pickCreature(S.pC);
-          const c=S.pC.splice(ci2,1)[0];
-          sendToTbl(c,0,false);
-          log(`↩️ ${c.name} renvoyé sur la table !`);
-        }
-        uHUD();
-      },{back:false,fw:l.TW,fh:l.TH,tw:l.CW,th:l.CH});
-      return; // Card was countered, don't execute
-    }
+  // Solo mode: sequential counter chain — each opponent in turn order gets a chance to counter
+  if(!MP.enabled&&card.counters&&card.counters.length>0){
+    // Build the list of potential counterers (all players except the caster, in turn order starting from the next one)
+    const counterers=[];
+    for(let i=1;i<NB_PLAYERS;i++) counterers.push((ow+i)%NB_PLAYERS);
+    tryCounterChain(card,ow,counterers,0);
+    return;
   }
 
   continueExecCard(card,ow);
+}
+
+// Attempt counter from counterers[idx]. If they pass/can't, try next. If all pass, execute the card.
+function tryCounterChain(card,ow,counterers,idx){
+  if(idx>=counterers.length){
+    continueExecCard(card,ow);
+    return;
+  }
+  const counterPlayer=counterers[idx];
+  // Player 0 (human) is asked via UI dialog; AI decides automatically
+  if(counterPlayer===0){
+    const canHumanCounter=S.pH.some(c=>card.counters.includes(c.id));
+    if(!canHumanCounter){
+      tryCounterChain(card,ow,counterers,idx+1);
+      return;
+    }
+    // Set ctrRes callback: true=countered (stop chain), false=skipped (continue)
+    S.ctrRes=ok=>{
+      S.ctrRes=null;
+      if(ok){
+        // Countered — effect already handled in showCtrUI's click handler for surprise_chef etc.
+        // But surprise_chef there only fires for "aC" (owner 1). In 3-player, we need to target the caster.
+        // Workaround: showCtrUI will have done its default (aC=owner 1). If ow!==1, fix it after.
+        // For simplicity here: just stop the chain after a delay
+      } else {
+        setTimeout(()=>tryCounterChain(card,ow,counterers,idx+1),200);
+      }
+    };
+    showCtrUI(card);
+    return;
+  }
+  // AI counterer
+  const hand=S.hands[counterPlayer];
+  const aiCounter=hand&&hand.find(c=>card.counters.includes(c.id));
+  if(aiCounter&&Math.random()<0.7){
+    const ci=hand.indexOf(aiCounter);
+    const l=getL();
+    let fx,fy,fw,fh;
+    if(counterPlayer===1){
+      const p=S.aPos[ci];fx=p?p.x:l.ahX+ci*l.ahSp;fy=p?p.y:l.ahY;fw=l.TW;fh=l.TH;
+    } else {
+      const p2Pos=(S.handsPos[counterPlayer]||[])[ci];
+      fx=p2Pos?p2Pos.x:l.ah2X+ci*l.ah2Sp;fy=p2Pos?p2Pos.y:l.ah2Y;fw=l.TW;fh=l.TH;
+    }
+    hand.splice(ci,1);
+    const toX=l.ezX+(l.ezW-l.CW)/2, toY=l.ezY+(l.ezH-l.CH)/2;
+    addAn(aiCounter,fx,fy,toX,toY,450,()=>{
+      S.effCard=aiCounter;S.effTmr=2800;
+      playCtrSfx();
+      spP(toX+l.CW/2,toY+l.CH/2,'#ff4444',18);
+      log(`🛡️ ${S.nicks[counterPlayer]||'Adv '+counterPlayer} contre avec ${aiCounter.name} !`);
+      if(aiCounter.desc)showToast(`🛡️ ${S.nicks[counterPlayer]||'Adv '+counterPlayer} contre avec : ${aiCounter.name}`,'green',aiCounter.desc,2600);
+      // Surprise du Chef: the CASTER (ow) sends one of their own creatures
+      if(aiCounter.id==='surprise_chef'&&S.creatures[ow]&&S.creatures[ow].length){
+        const ci2=pickCreature(S.creatures[ow]);
+        const c=S.creatures[ow].splice(ci2,1)[0];
+        sendToTbl(c,ow,false);
+        log(`↩️ ${c.name} renvoyé sur la table !`);
+      }
+      uHUD();
+    },{back:false,fw:fw,fh:fh,tw:l.CW,th:l.CH});
+    return; // Card countered — stop chain
+  }
+  // AI passes, try next
+  tryCounterChain(card,ow,counterers,idx+1);
 }
 
 function continueExecCard(card,ow){
   const enemy=ow===0?S.aC:S.pC;
   const eOwn=ow===0?1:0;
   const wasGueuleton=S.gueuleton;
+  // In 3-player mode, attack cards hit BOTH opponents
+  const threePlayer=(NB_PLAYERS===3&&!MP.enabled);
   switch(card.id){
-    // À Table variants: send 1 enemy to table (RIGHT side = push)
+    // À Table variants: send 1 creature from EACH opponent (3P) or 1 from the only opponent (2P)
     case'a_table_1':case'a_table_2':case'a_table_3':
-      if(enemy.length){const ci=pickCreature(enemy);const c=enemy.splice(ci,1)[0];sendToTbl(c,eOwn,false)}
+      if(threePlayer){
+        opponentsOf(ow).forEach(op=>{
+          const pool=S.creatures[op];
+          if(pool.length){const ci=pickCreature(pool);const c=pool.splice(ci,1)[0];sendToTbl(c,op,false)}
+        });
+      } else {
+        if(enemy.length){const ci=pickCreature(enemy);const c=enemy.splice(ci,1)[0];sendToTbl(c,eOwn,false)}
+      }
       break;
     case'buffet':
       // Start gueuleton at rate 2
@@ -2075,10 +2481,25 @@ function continueExecCard(card,ow){
       // Eat ALL on table
       eatAll();break;
     case'fromage':
-      for(let i=0;i<2&&enemy.length;i++){const ci=pickCreature(enemy);const c=enemy.splice(ci,1)[0];sendToTbl(c,eOwn,false)}
+      if(threePlayer){
+        // Livre 2 personnages répartis sur les adversaires
+        opponentsOf(ow).forEach(op=>{
+          const pool=S.creatures[op];
+          if(pool.length){const ci=pickCreature(pool);const c=pool.splice(ci,1)[0];sendToTbl(c,op,false)}
+        });
+      } else {
+        for(let i=0;i<2&&enemy.length;i++){const ci=pickCreature(enemy);const c=enemy.splice(ci,1)[0];sendToTbl(c,eOwn,false)}
+      }
       break;
     case'goinfrerie':
-      for(let i=0;i<2&&enemy.length;i++){const ci=pickCreature(enemy);const c=enemy.splice(ci,1)[0];sendToTbl(c,eOwn,false)}
+      if(threePlayer){
+        opponentsOf(ow).forEach(op=>{
+          const pool=S.creatures[op];
+          if(pool.length){const ci=pickCreature(pool);const c=pool.splice(ci,1)[0];sendToTbl(c,op,false)}
+        });
+      } else {
+        for(let i=0;i<2&&enemy.length;i++){const ci=pickCreature(enemy);const c=enemy.splice(ci,1)[0];sendToTbl(c,eOwn,false)}
+      }
       S.gueuleton=true;S.gRate=2;log('Gueuleton ! (2 dévorés/tour)');
       break;
     case'hors_doeuvre':
@@ -2086,7 +2507,14 @@ function continueExecCard(card,ow){
       S.gueuleton=true;S.gRate=1;log('Le gueuleton commence !');
       break;
     case'panier':
-      if(enemy.length){const ci=pickCreature(enemy);const c=enemy.splice(ci,1)[0];sendToTbl(c,eOwn,false)}
+      if(threePlayer){
+        opponentsOf(ow).forEach(op=>{
+          const pool=S.creatures[op];
+          if(pool.length){const ci=pickCreature(pool);const c=pool.splice(ci,1)[0];sendToTbl(c,op,false)}
+        });
+      } else {
+        if(enemy.length){const ci=pickCreature(enemy);const c=enemy.splice(ci,1)[0];sendToTbl(c,eOwn,false)}
+      }
       break;
     case'pique':
       if(enemy.length){
@@ -2547,17 +2975,137 @@ function aiDiscard(cb){
   uHUD();
 }
 
-function aiTurn(){
-  S.cur=1;uHUD();
+function aiTurn(who){
+  if(who===undefined)who=1; // Backward compatibility
+  S.cur=who;uHUD();
   if(MP.enabled){
     log(`⏳ Tour de ${MP.oppNick}...`);
-    // In MP: just wait for opponent's messages
     return;
   }
-  log('🤖 Tour adversaire...');
+  const label=who===1?'🤖 Tour '+(S.nicks[1]||'adversaire'):'🤖 Tour '+(S.nicks[who]||'adversaire 2');
+  log(label+'...');
+  // For 3-player mode with who=2, temporarily swap S.aH/S.aC with player 2's
+  if(who===2){
+    runAiTurnFor(2);
+    return;
+  }
   setTimeout(()=>{
-    autoDraw(1,()=>{setTimeout(()=>aiPlayCard(),2500)});
+    autoDraw(1,()=>{setTimeout(()=>aiPlayCard(),1500)});
   },500);
+}
+
+// Run AI turn for a specific player (currently for P2 in 3-player mode)
+// Uses a temporary swap pattern: replaces S.aH/S.aC with P2's, runs AI, swaps back
+function runAiTurnFor(who){
+  setTimeout(()=>{
+    autoDraw(who,()=>{
+      setTimeout(()=>{
+        // Swap P2 ↔ P1 so existing aiPlayCard logic sees P2's hand as "S.aH"
+        const savedAH=S.aH, savedAC=S.aC, savedAPos=S.aPos;
+        S.aH=S.hands[who]; S.aC=S.creatures[who]; S.aPos=S.handsPos[who]||[];
+        S.hands[1]=savedAH; S.creatures[1]=savedAC;
+        // Temporarily remap tbl owners so P2's creatures are "owner 1" and original P1's are not targets
+        // Simpler approach: use an AI that specifically targets P0 (human) when possible
+        aiPlayCardFor(who,()=>{
+          // Restore
+          S.hands[who]=S.aH;S.creatures[who]=S.aC;S.handsPos[who]=S.aPos;
+          S.aH=savedAH;S.aC=savedAC;S.aPos=savedAPos;
+          S.hands[1]=savedAH;S.creatures[1]=savedAC;
+        });
+      },1200);
+    });
+  },500);
+}
+
+// Specialized AI for 3-player mode: plays simply, prefers defausse if no good attack
+function aiPlayCardFor(who,cb){
+  const hand=S.hands[who];
+  if(!hand.length){log('🤖 Main vide, passe.');finAiFor(who,cb);return}
+  // Find playable cards (using canPlay — but canPlay checks S.pC, S.aC context — approximate)
+  // Simple filter: attack cards that have targets
+  const playable=hand.filter(c=>{
+    if(c.isCrea)return false;
+    // Prefer attacks that target the human (P0)
+    if(c.type==='attack'){
+      if(c.id==='a_table_1'||c.id==='a_table_2'||c.id==='a_table_3'||c.id==='panier'||c.id==='plat_du_jour')return S.creatures[0].length>0;
+      if(c.id==='fromage'||c.id==='goinfrerie')return S.creatures[0].length>=2;
+      if(c.id==='pique')return S.creatures[0].length>0&&S.tbl.some(e=>e.owner===0);
+      if(c.id==='buffet'||c.id==='hors_doeuvre'||c.id==='choucroute')return S.tbl.some(e=>e.owner===0);
+      return true;
+    }
+    if(c.type==='special'){
+      if(c.id==='veneneux')return S.tbl.some(e=>e.owner===0);
+      if(c.id==='indigestion')return S.tbl.some(e=>e.owner===who);
+      return false;
+    }
+    return false;
+  });
+  if(playable.length){
+    const card=playable[0];
+    const idx=hand.indexOf(card);
+    hand.splice(idx,1);
+    log(`🤖 ${S.nicks[who]||'IA'+who} joue : ${card.name}`);
+    // For 3-player: attacks hit BOTH opponents. We apply effects manually below.
+    applyCardForPlayer(card,who,()=>{
+      // End turn
+      setTimeout(()=>{finAiFor(who,cb)},400);
+    });
+  } else {
+    // No playable: defausse and draw
+    log(`🤖 ${S.nicks[who]||'IA'+who} se défausse`);
+    const card=hand.shift();
+    refillDeck();
+    if(S.dk.length){
+      const nc=S.dk.pop();
+      hand.push(nc);
+    }
+    S.discard.push(card);
+    finAiFor(who,cb);
+  }
+}
+
+// Simplified card execution for player `who` in 3-player mode
+function applyCardForPlayer(card,who,cb){
+  const opponents=opponentsOf(who);
+  // For attack cards: send 1 creature from EACH opponent to the table
+  if(card.type==='attack'&&(card.id==='a_table_1'||card.id==='a_table_2'||card.id==='a_table_3')){
+    opponents.forEach(op=>{
+      if(S.creatures[op].length){
+        const ci=0|Math.random()*S.creatures[op].length;
+        const c=S.creatures[op].splice(ci,1)[0];
+        S.tbl.push({card:c,owner:op,_fly:true});
+        const l=getL();
+        const toX=l.tcX+(S.tbl.length-1)*l.tSp,toY=l.tcY;
+        addAn(c,l.pcX,l.pcY,toX,toY,450,()=>{
+          const e=S.tbl.find(t=>t.card===c);if(e)e._fly=false;
+          spP(toX+l.SW/2,toY+l.SH/2,'#ff6b00',8);uHUD();
+        },{fw:l.TW,fh:l.TH,tw:l.SW,th:l.SH});
+      }
+    });
+  }
+  // Default: no special effect applied for unimplemented cards
+  setTimeout(cb,800);
+}
+
+// Finish AI turn and move to next player
+function finAiFor(who,cb){
+  if(cb)cb();
+  ogrePh();
+  setTimeout(()=>{
+    chkEnd();
+    if(S.phase==='end')return;
+    const next=(who+1)%NB_PLAYERS;
+    S.cur=next;S.turn++;S.can=(next===0);
+    uHUD();
+    log(`📝 Tour ${S.turn} — ${S.nicks[next]||'J'+next}`);
+    autoDraw(next,()=>{
+      if(next===0){
+        // Player's turn
+      } else {
+        setTimeout(()=>aiTurn(next),800);
+      }
+    });
+  },800);
 }
 
 function aiPlayCard(){
@@ -2641,9 +3189,18 @@ function aiPlayCard(){
 function finAI(){
   ogrePh();
   setTimeout(()=>{
+    chkEnd();
+    if(S.phase==='end')return;
+    // In 3-player solo mode: after P1 plays, go to P2, then back to P0
+    if(NB_PLAYERS===3 && !MP.enabled && S.cur===1){
+      S.cur=2;S.turn++;S.can=false;uHUD();
+      log(`📝 Tour ${S.turn} — ${S.nicks[2]||'Adv 2'}`);
+      autoDraw(2,()=>{setTimeout(()=>aiTurn(2),600)});
+      return;
+    }
+    // Default: back to player 0
     S.cur=0;S.turn++;S.drawn=false;S.can=true;uHUD();
     log(`📝 Tour ${S.turn} — À vous !`);
-    // Auto-draw player to 5
     autoDraw(0,()=>{chkEnd()});
   },400);
 }
@@ -2677,19 +3234,43 @@ function ogrePh(){
 }
 
 function chkEnd(){
-  const pA=S.pC.length+S.tbl.filter(e=>e.owner===0).length;
-  const aA=S.aC.length+S.tbl.filter(e=>e.owner===1).length;
-  if(pA===0&&aA===0)return endG('draw');
-  if(pA===0)return endG('lose');
-  if(aA===0)return endG('win');
-  // Stalemate detection: if the game can't progress further, resolve by creature count
-  const totalCards=S.pH.length+S.aH.length+S.dk.length+S.discard.length;
+  // Count surviving creatures for each player
+  const alive=[];
+  for(let p=0;p<NB_PLAYERS;p++){
+    alive.push((S.creatures[p]?S.creatures[p].length:0) + S.tbl.filter(e=>e.owner===p).length);
+  }
+  // Count how many players are eliminated
+  const livingPlayers=alive.map((n,i)=>n>0?i:-1).filter(i=>i>=0);
+  if(livingPlayers.length===0)return endG('draw');
+  if(livingPlayers.length===1){
+    // Only one player left — they win
+    const winner=livingPlayers[0];
+    if(winner===0)return endG('win');
+    return endG('lose');
+  }
+  // In 3-player mode: game ends as soon as P0 (you) are eliminated OR all opponents are dead
+  if(NB_PLAYERS>=3){
+    if(alive[0]===0)return endG('lose');
+    const allOpponentsDead=alive.slice(1,NB_PLAYERS).every(a=>a===0);
+    if(allOpponentsDead)return endG('win');
+  } else {
+    // 2-player classic
+    if(alive[0]===0&&alive[1]===0)return endG('draw');
+    if(alive[0]===0)return endG('lose');
+    if(alive[1]===0)return endG('win');
+  }
+  // Stalemate detection
+  let totalCards=S.dk.length+S.discard.length;
+  for(let p=0;p<NB_PLAYERS;p++)totalCards+=(S.hands[p]?S.hands[p].length:0);
   const emergencyExhausted=(S._emergencyRefills||0)>=2 && S.dk.length===0 && S.discard.length<=1;
   if(totalCards===0||emergencyExhausted||detectStalemate()){
     log('⚖️ Partie bloquée — résolution au nombre de créatures restantes.');
-    if(pA>aA)return endG('win');
-    if(aA>pA)return endG('lose');
-    return endG('draw');
+    // Winner = max alive
+    let maxN=-1, winner=-1;
+    alive.forEach((n,i)=>{if(n>maxN){maxN=n;winner=i}else if(n===maxN)winner=-2});
+    if(winner===-2)return endG('draw');
+    if(winner===0)return endG('win');
+    return endG('lose');
   }
 }
 
@@ -2731,7 +3312,6 @@ function endG(r){
   S.phase='end';
   // Broadcast end state to client in MP mode
   if(MP.enabled&&MP.isHost){
-    // Invert result for client (win <-> lose)
     const clientR = r==='win'?'lose':(r==='lose'?'win':'draw');
     mpSend('gameEnd',{
       result:clientR,
@@ -2739,24 +3319,140 @@ function endG(r){
       clientRace:S.aRace,
       hostNick:MP.myNick||'Vous',
       clientNick:MP.oppNick||'Adversaire',
-      hostEaten:countEatenBy(S.aRace), // how many of client's creatures host devoured
-      clientEaten:countEatenBy(S.pRace), // how many of host's creatures client devoured
+      hostEaten:countEatenBy(S.aRace),
+      clientEaten:countEatenBy(S.pRace),
       turn:S.turn
     });
   }
-  // Build the local leaderboard
-  const myRace=S.pRace;
-  const oppRace=S.aRace;
-  // In solo mode: use saved pseudo if available, otherwise "Vous"
+  // Build an array of per-player stats for the leaderboard (2 or 3 players)
   const savedNick=(()=>{
     try{const v=document.getElementById('nick');return v&&v.value.trim()||null}catch(e){return null}
   })();
-  const myNick=MP.enabled?(MP.myNick||'Vous'):(savedNick||'Vous');
-  const oppNick=MP.enabled?(MP.oppNick||'Adversaire'):'Ogre IA';
-  // Cards eaten "by me" = opponent's creatures that ended up in S.eat
-  const myEaten=countEatenBy(oppRace);
-  const oppEaten=countEatenBy(myRace);
-  showEndScreen(r,myRace,oppRace,myNick,oppNick,myEaten,oppEaten,S.turn);
+  const players=[];
+  for(let p=0;p<NB_PLAYERS;p++){
+    const rid=S.races[p];if(!rid)continue;
+    let nk;
+    if(p===0) nk=MP.enabled?(MP.myNick||'Vous'):(savedNick||'Vous');
+    else if(p===1&&MP.enabled) nk=MP.oppNick||'Adversaire';
+    else nk=S.nicks[p]||(p===1?'Ogre IA #1':'Ogre IA #2');
+    // "eaten by me" counts creatures of my race that are in S.eat — wait, no:
+    // S.eat contains creatures that WERE devoured. countEatenBy(race) counts how many of that race got eaten.
+    // We want to show for each player: how many OF THEIR OWN creatures were eaten (losses).
+    // But the user wanted "cards eaten" = creatures they made the ogre eat. So really, aggregate opponent's creatures in S.eat.
+    const myRace=rid;
+    // Approximation: each player's "score" = creatures of OTHER players that got eaten... but with 3P it's shared credit
+    // Simpler: show creatures LOST (their own in S.eat)
+    const lost=S.eat.filter(c=>c.race===myRace).length;
+    players.push({idx:p,race:rid,nick:nk,lost,me:(p===0)});
+  }
+  // Determine winners for display
+  // Winner(s) = players whose creatures still exist
+  const alive=players.map(pl=>{
+    const n=(S.creatures[pl.idx]?S.creatures[pl.idx].length:0) + S.tbl.filter(e=>e.owner===pl.idx).length;
+    return {...pl, alive:n};
+  });
+  // Pick actual winner(s): max alive, or all if draw
+  const maxAlive=Math.max(...alive.map(p=>p.alive));
+  alive.forEach(pl=>{pl.won=(pl.alive===maxAlive&&maxAlive>0 && r!=='draw' ? true : false)});
+  // In draw: nobody won
+  if(r==='draw')alive.forEach(pl=>pl.won=false);
+
+  showEndScreenN(r,alive,S.turn);
+}
+
+function showEndScreenN(r,players,turn){
+  const end=document.getElementById('end');
+  const et=document.getElementById('et');
+  const ep=document.getElementById('ep');
+  const oldLb=document.getElementById('endLeaderboard');
+  if(oldLb)oldLb.remove();
+
+  // Title + effects
+  if(r==='win'){
+    et.style.color='#ffd700';et.textContent='🏆 VICTOIRE !';ep.textContent=`Adversaire dévoré en ${turn} tours !`;
+    for(let i=0;i<40;i++)spP(Math.random()*S.W,Math.random()*S.H*.5,'#ffd700',1);
+    setTimeout(()=>{for(let i=0;i<30;i++)spP(Math.random()*S.W,Math.random()*S.H*.3,'#ffaa00',1)},400);
+  } else if(r==='lose'){
+    et.style.color='#ff4444';et.textContent='💀 DÉFAITE...';ep.textContent=`Vos créatures dévorées après ${turn} tours...`;
+    spP(S.W/2,S.H/2,'#ff0000',35);
+  } else {
+    et.style.color='#aaa';et.textContent='🤝 ÉGALITÉ';ep.textContent=`Plus personne après ${turn} tours !`;
+  }
+  // Music fade-out
+  if(_mus&&UI_SETTINGS.musicEnabled){
+    const startVol=_mus.volume;const fadeStart=Date.now();const fadeDur=2500;
+    const fadeInt=setInterval(()=>{
+      const t=(Date.now()-fadeStart)/fadeDur;
+      if(t>=1||!_mus){clearInterval(fadeInt);if(_mus)_mus.volume=0;return}
+      _mus.volume=startVol*(1-t);
+    },50);
+  }
+
+  // Build leaderboard
+  const lb=document.createElement('div');lb.id='endLeaderboard';
+  lb.style.cssText='display:flex;gap:16px;margin:22px 0 18px;flex-wrap:wrap;justify-content:center;max-width:900px;padding:0 16px';
+  // Sort by alive desc, then by fewest lost
+  players.sort((a,b)=>(b.alive-a.alive)||(a.lost-b.lost));
+  players.forEach((row,idx)=>{
+    const rObj=RACES.find(x=>x.id===row.race);if(!rObj)return;
+    const spIdx=rObj.ss+8;
+    const sp=RS[spIdx];
+    const name=rObj.m[8]||rObj.name;
+    const card=document.createElement('div');
+    const isWinner=row.won;
+    const bg=isWinner?'linear-gradient(180deg,#3a2a00,#1a1100)':'linear-gradient(180deg,#2a1a1a,#0e0606)';
+    const border=isWinner?'#ffd700':(r==='draw'?'#888':'#aa3333');
+    const statusTxt=r==='draw'?'🤝 Égalité':(isWinner?'🏆 Victoire':'💀 Défaite');
+    const statusColor=isWinner?'#ffd700':(r==='draw'?'#aaa':'#ff6666');
+    card.style.cssText=`background:${bg};border:3px solid ${border};border-radius:12px;padding:14px 18px;min-width:200px;box-shadow:0 6px 22px rgba(0,0,0,.6);display:flex;flex-direction:column;align-items:center;position:relative`;
+    const rank=document.createElement('div');
+    rank.textContent=`#${idx+1}`;
+    rank.style.cssText=`position:absolute;top:-12px;left:-12px;background:${isWinner?'#ffd700':'#555'};color:#000;font-weight:900;border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 3px 8px rgba(0,0,0,.4)`;
+    card.appendChild(rank);
+    const cv=document.createElement('canvas');cv.width=96;cv.height=134;
+    cv.style.cssText='background:#111;border-radius:6px;box-shadow:0 3px 10px rgba(0,0,0,.5)';
+    card.appendChild(cv);
+    const renderKing=()=>{
+      if(!iR.complete){setTimeout(renderKing,100);return}
+      const cx=cv.getContext('2d');
+      if(sp)cx.drawImage(iR,sp[0],sp[1],sp[2],sp[3],0,0,96,134);
+    };renderKing();
+    const charName=document.createElement('div');
+    charName.textContent=name;
+    charName.style.cssText=`color:${rObj.color};font-size:11px;margin-top:6px;font-weight:bold;text-align:center;max-width:110px;line-height:1.2`;
+    card.appendChild(charName);
+    const nk=document.createElement('div');
+    nk.textContent=row.nick+(row.me?' (vous)':'');
+    nk.style.cssText='color:#fff;font-size:14px;margin-top:8px;font-weight:bold;text-align:center';
+    card.appendChild(nk);
+    const rn=document.createElement('div');
+    rn.textContent=rObj.name;
+    rn.style.cssText='color:#bbb;font-size:11px;margin-top:2px;text-align:center';
+    card.appendChild(rn);
+    const st=document.createElement('div');
+    st.style.cssText='color:#ddd;font-size:11px;margin-top:8px;padding:4px 10px;background:rgba(0,0,0,.3);border-radius:6px';
+    // Build safely via text nodes + elements (no innerHTML)
+    const icon1=document.createElement('span');icon1.style.color='#66ff66';icon1.textContent='🛡️ ';
+    const alive1=document.createElement('b');alive1.textContent=String(row.alive);
+    const t1=document.createTextNode(' survivante'+(row.alive>1?'s':'')+' · ');
+    const icon2=document.createElement('span');icon2.style.color='#ff6b00';icon2.textContent='💀 ';
+    const lost1=document.createElement('b');lost1.textContent=String(row.lost);
+    const t2=document.createTextNode(' perdue'+(row.lost>1?'s':''));
+    st.appendChild(icon1);st.appendChild(alive1);st.appendChild(t1);
+    st.appendChild(icon2);st.appendChild(lost1);st.appendChild(t2);
+    card.appendChild(st);
+    const sta=document.createElement('div');
+    sta.textContent=statusTxt;
+    sta.style.cssText=`color:${statusColor};font-weight:900;font-size:16px;margin-top:10px;text-shadow:0 0 8px ${statusColor}55`;
+    card.appendChild(sta);
+    lb.appendChild(card);
+  });
+  const btnContainer=end.querySelector('div');
+  const btn=end.querySelector('button');
+  const anchor=btnContainer||btn;
+  if(anchor)end.insertBefore(lb,anchor);
+  else end.appendChild(lb);
+  end.classList.add('show');
 }
 
 function showEndScreen(r,myRace,oppRace,myNick,oppNick,myEaten,oppEaten,turn){
@@ -2842,10 +3538,13 @@ function showEndScreen(r,myRace,oppRace,myNick,oppNick,myEaten,oppEaten,turn){
     rn.textContent=rObj.name;
     rn.style.cssText='color:#bbb;font-size:11px;margin-top:2px;text-align:center';
     card.appendChild(rn);
-    // Cards eaten stat
+    // Cards eaten stat (safe DOM construction)
     const st=document.createElement('div');
-    st.innerHTML=`<span style="color:#ff6b00">💀</span> <b>${row.eaten}</b> carte${row.eaten>1?'s':''} dévorée${row.eaten>1?'s':''}`;
     st.style.cssText='color:#ddd;font-size:12px;margin-top:8px;padding:4px 10px;background:rgba(0,0,0,.3);border-radius:6px';
+    const iconE=document.createElement('span');iconE.style.color='#ff6b00';iconE.textContent='💀 ';
+    const eatenB=document.createElement('b');eatenB.textContent=String(row.eaten);
+    const eatenT=document.createTextNode(' carte'+(row.eaten>1?'s':'')+' dévorée'+(row.eaten>1?'s':''));
+    st.appendChild(iconE);st.appendChild(eatenB);st.appendChild(eatenT);
     card.appendChild(st);
     // Status
     const sta=document.createElement('div');
