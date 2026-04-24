@@ -282,6 +282,8 @@ function resetGameState(){
   S._progressSig=undefined;
   S._returning=0;
   S._sending=0;
+  S._pinnedTarget=undefined;
+  S.eliminated=[false,false,false];
   S._l=null; // layout cache
   // Clear pending MP snap/timer (if any left over)
   if(typeof _pendSnap!=='undefined'){_pendSnap=null;if(_pendTimer){clearInterval(_pendTimer);_pendTimer=null}}
@@ -647,7 +649,14 @@ function hostExecuteClientDiscard(idx){
 
 // End turn, hand to owner=nextPlayer
 function finTurn(justPlayed){
-  const next=(justPlayed+1)%NB_PLAYERS;
+  // Find the next non-eliminated player. Defensive against all-eliminated (shouldn't happen but avoids infinite loop).
+  if(!S.eliminated)S.eliminated=new Array(NB_PLAYERS).fill(false);
+  let next=(justPlayed+1)%NB_PLAYERS;
+  let safetyLoop=0;
+  while(S.eliminated[next] && safetyLoop<NB_PLAYERS){
+    next=(next+1)%NB_PLAYERS;
+    safetyLoop++;
+  }
   // Note: autoDraw for justPlayed already happened immediately after they played.
   // We only need to draw for the next player (if their hand is short).
   S.cur=next;S.turn++;S.can=(next===0);
@@ -1493,7 +1502,12 @@ function startMpGame(){
     S.dk=[];ACTIONS.forEach(a=>{for(let i=0;i<a.count;i++)S.dk.push({...a,isCrea:false,uid:Math.random().toString(36).slice(2)})});
     shuf(S.dk);S.pH=[];S.aH=[];
     for(let i=0;i<5;i++){if(S.dk.length)S.pH.push(S.dk.pop());if(S.dk.length)S.aH.push(S.dk.pop())}
-    S.tbl=[];S.eat=[];S.turn=1;S.cur=0;S.can=true;S.drawn=false;S.sel=-1;S.phase='play';S.pPos=[];S.aPos=[];S.discard=[];S._emergencyRefills=0;
+    S.tbl=[];S.eat=[];S.turn=1;S.can=true;S.drawn=false;S.sel=-1;S.phase='play';S.pPos=[];S.aPos=[];S.discard=[];S._emergencyRefills=0;
+    // Randomize starter: 0 = host, 1 = client. Host picks and then announces via snapshot.
+    // Seed with Math.random() so each game has a 50/50 chance of either player starting.
+    S.cur = Math.random() < 0.5 ? 0 : 1;
+    S.can = (S.cur === 0);
+    const starterNick = (S.cur === 0) ? MP.myNick : MP.oppNick;
     // Mirror to N-player structures (MP is always 2 players for now)
     S.races=[MP.myRace,MP.oppRace,null];
     S.nicks=[MP.myNick,MP.oppNick,''];
@@ -1502,12 +1516,26 @@ function startMpGame(){
     S.handsPos=[S.pPos,S.aPos,[]];
     S.creaturesPos=[[],[],[]];
     log(`🎮 ${MP.myNick} (${pR.name}) vs ${MP.oppNick} (${aR.name}) !`);
+    log(`🎲 ${starterNick} commence la partie !`);
+    if(S.cur === 0){
+      showToast(`🎲 Vous commencez la partie !`, 'green', null, 2500);
+    } else {
+      showToast(`🎲 ${MP.oppNick} commence la partie !`, 'orange', null, 2500);
+    }
+    // Announce the starter to the client (who will receive a mirrored perspective via the snapshot)
+    setTimeout(()=>{
+      // From client's POV, starter === 0 means "the opponent (host) starts", starter === 1 means "I start"
+      const clientStarterLabel = (S.cur === 0) ? MP.myNick : 'Vous';
+      const clientColor = (S.cur === 0) ? 'orange' : 'green';
+      mpSend('toast', {msg: `🎲 ${clientStarterLabel} commence la partie !`, variant: clientColor, dur: 2500});
+    }, 200);
     uHUD();
     setTimeout(()=>hostSync(),200);
   } else {
     S.pRace=MP.myRace;
     S.aRace=MP.oppRace;
     S.pH=[];S.aH=[];S.pC=[];S.aC=[];S.tbl=[];S.eat=[];S.dk=[];S.discard=[];
+    // Client doesn't know who starts yet — the first snapshot from host will set cur/can correctly.
     S.phase='play';S.turn=1;S.cur=1;S.can=false;S.pPos=[];S.aPos=[];
     // Mirror to N-player structures
     S.races=[MP.myRace,MP.oppRace,null];
@@ -1644,7 +1672,7 @@ const ACTIONS=[
 {id:'buffet',name:'Buffet à Volonté',desc:'Le gueuleton commence (2 dévorés/tour).',type:'attack',count:2,sprite:'buffet',counters:[]},
 {id:'choucroute',name:'Choucroute Melba',desc:'Tous sur la table sont dévorés.',type:'attack',count:1,sprite:'choucroute',counters:[]},
 {id:'fromage',name:'Fromage & Dessert',desc:'Livrez 2 personnages adverses au géant.',type:'attack',count:3,sprite:'fromage',counters:['surprise_chef','trop_sale']},
-{id:'goinfrerie',name:'Goinfrérie',desc:'Livrez 2 adversaires. Gueuleton (2/tour).',type:'attack',count:2,sprite:'goinfrerie',counters:['surprise_chef','garde_manger']},
+{id:'goinfrerie',name:'Goinfrérie',desc:'Livrez 2 adversaires. Gueuleton (2/tour).',type:'attack',count:2,sprite:'goinfrerie',counters:['garde_manger']},
 {id:'hors_doeuvre',name:"Hors d'Œuvre",desc:'Le gueuleton commence immédiatement.',type:'attack',count:2,sprite:'hors_doeuvre',counters:[]},
 {id:'panier',name:'Panier Garni',desc:'Livre un personnage adverse au géant.',type:'attack',count:3,sprite:'panier',counters:[]},
 {id:'pique',name:'Pique Assiette',desc:'Adversaire dévoré, mais livrez un des vôtres.',type:'attack',count:1,sprite:'pique',counters:[]},
@@ -1722,13 +1750,24 @@ function syncLegacy(){
 // Return the player index opposite of `me` (2-player mode) or array of opponents (N-player)
 function opponentsOf(me){
   const opps=[];
-  for(let i=0;i<NB_PLAYERS;i++) if(i!==me) opps.push(i);
+  for(let i=0;i<NB_PLAYERS;i++){
+    if(i===me)continue;
+    // Skip eliminated players — they can't be targeted, they have no creatures
+    if(S.eliminated && S.eliminated[i])continue;
+    opps.push(i);
+  }
   return opps;
 }
 // For 2-player compatibility: single opponent
 function opponentOf(me){ return (me===0)?1:0 }
-// Next player in turn order (circular)
-function nextPlayer(i){ return (i+1)%NB_PLAYERS }
+// Next player in turn order (circular), skipping eliminated players
+function nextPlayer(i){
+  let n=(i+1)%NB_PLAYERS, safety=0;
+  while(S.eliminated && S.eliminated[n] && safety<NB_PLAYERS){
+    n=(n+1)%NB_PLAYERS; safety++;
+  }
+  return n;
+}
 
 function shuf(a){for(let i=a.length-1;i>0;i--){const j=0|Math.random()*(i+1);[a[i],a[j]]=[a[j],a[i]]}return a}
 
@@ -2079,26 +2118,43 @@ function draw(){
   // so rendering stays correct even during runAiTurnFor's swap (when S.aH temporarily points to P2).
   const p1H=S.hands[1]||S.aH;
   const p1Pos=S.handsPos[1]||S.aPos;
-  X.fillStyle='rgba(200,150,60,.35)';X.fillText(`Main (${p1H.length})`,NB_PLAYERS===3?(l.ahX+l.ahSp*(p1H.length/2)):W/2,l.ahY-1);
-  for(let i=0;i<p1H.length;i++){
-    const p=p1Pos[i]||{x:l.ahX+i*l.ahSp,y:l.ahY};
-    drawCard(p.x,p.y,l.TW,l.TH,null,{back:true});
+  const p1Elim = S.eliminated && S.eliminated[1];
+  if(p1Elim){
+    // Draw large semi-transparent "ÉLIMINÉ" label across P1's row
+    X.fillStyle='rgba(255,70,70,.75)';
+    X.font='bold 16px sans-serif';X.textAlign='center';
+    X.fillText(`💀 ${S.nicks[1]||'J1'} ÉLIMINÉ`, NB_PLAYERS===3?(l.acX+l.acSp*3):W/2, l.ahY+l.TH/2);
+    X.font='10px sans-serif';
+  } else {
+    X.fillStyle='rgba(200,150,60,.35)';X.fillText(`Main (${p1H.length})`,NB_PLAYERS===3?(l.ahX+l.ahSp*(p1H.length/2)):W/2,l.ahY-1);
+    for(let i=0;i<p1H.length;i++){
+      const p=p1Pos[i]||{x:l.ahX+i*l.ahSp,y:l.ahY};
+      drawCard(p.x,p.y,l.TW,l.TH,null,{back:true});
+    }
   }
 
   // Opponent 2 (only in 3-player mode) — right side
   if(NB_PLAYERS===3 && S.creatures[2]){
     const p2C=S.creatures[2],p2H=S.hands[2]||[];
+    const p2Elim = S.eliminated && S.eliminated[2];
     X.fillStyle='rgba(255,100,100,.5)';
     X.fillText(`${S.nicks[2]||'J2'} (${p2C.length})`,l.ac2X+l.ac2Sp*(p2C.length/2),l.ac2Y-1);
     for(let i=0;i<p2C.length;i++){drawCard(l.ac2X+i*l.ac2Sp,l.ac2Y,l.TW,l.TH,p2C[i])}
-    X.fillStyle='rgba(200,150,60,.35)';
-    X.fillText(`Main (${p2H.length})`,l.ah2X+l.ah2Sp*(p2H.length/2),l.ah2Y-1);
-    for(let i=0;i<p2H.length;i++){
-      const p2Pos=(S.handsPos[2]||[])[i]||{x:l.ah2X+i*l.ah2Sp,y:l.ah2Y};
-      drawCard(p2Pos.x,p2Pos.y,l.TW,l.TH,null,{back:true});
+    if(p2Elim){
+      X.fillStyle='rgba(255,70,70,.75)';
+      X.font='bold 16px sans-serif';X.textAlign='center';
+      X.fillText(`💀 ${S.nicks[2]||'J2'} ÉLIMINÉ`, l.ah2X+l.ah2Sp*3, l.ah2Y+l.TH/2);
+      X.font='10px sans-serif';
+    } else {
+      X.fillStyle='rgba(200,150,60,.35)';
+      X.fillText(`Main (${p2H.length})`,l.ah2X+l.ah2Sp*(p2H.length/2),l.ah2Y-1);
+      for(let i=0;i<p2H.length;i++){
+        const p2Pos=(S.handsPos[2]||[])[i]||{x:l.ah2X+i*l.ah2Sp,y:l.ah2Y};
+        drawCard(p2Pos.x,p2Pos.y,l.TW,l.TH,null,{back:true});
+      }
     }
-    // Current-turn glow for P2
-    if(S.cur===2){
+    // Current-turn glow for P2 (only if not eliminated)
+    if(S.cur===2 && !p2Elim){
       X.strokeStyle='rgba(255,200,50,.7)';X.lineWidth=2;
       rr(l.ac2X-4,l.ac2Y-4,l.ac2Sp*Math.max(p2C.length-1,0)+l.TW+8,l.TH+8,6);X.stroke();
     }
@@ -2643,13 +2699,29 @@ function startGame(){
       if(S.dk.length)S.hands[p].push(S.dk.pop());
     }
   }
-  S.tbl=[];S.eat=[];S.turn=1;S.cur=0;S.can=true;S.drawn=false;S.sel=-1;S.phase='play';S._emergencyRefills=0;S.discard=[];
+  S.tbl=[];S.eat=[];S.turn=1;S.drawn=false;S.sel=-1;S.phase='play';S._emergencyRefills=0;S.discard=[];
+  // Randomize starter across all players (0 = you, 1 = P1, 2 = P2 in 3-player mode)
+  S.cur = Math.floor(Math.random() * nPlayers);
+  S.can = (S.cur === 0);
+  // Elimination tracking: a player becomes eliminated when their total creature count hits zero.
+  // At that moment, their remaining hand cards animate to the discard pile and they are skipped in turn rotation.
+  S.eliminated=[false,false,false];
   // Sync legacy fields
   syncLegacy();
   if(nPlayers===3){
     log(`🎮 ${S.nicks[0]} (${RACES.find(r=>r.id===S.races[0]).name}) vs ${S.nicks[1]} (${RACES.find(r=>r.id===S.races[1]).name}) vs ${S.nicks[2]} (${RACES.find(r=>r.id===S.races[2]).name}) !`);
   } else {
     log(`🎮 ${pR.name} vs ${aR.name} !`);
+  }
+  // Announce the starter with a toast
+  const starterName = S.nicks[S.cur] || (S.cur === 0 ? 'Vous' : 'Adv '+S.cur);
+  log(`🎲 ${starterName} commence la partie !`);
+  if(S.cur === 0){
+    showToast(`🎲 Vous commencez la partie !`, 'green', null, 2500);
+  } else {
+    showToast(`🎲 ${starterName} commence la partie !`, 'orange', null, 2500);
+    // Trigger the AI turn after a short delay so the player can see the toast
+    setTimeout(()=>aiTurn(S.cur), 1200);
   }
   log('📝 Cliquez une carte, re-cliquez pour jouer.');uHUD();
 }
@@ -2948,6 +3020,8 @@ C.addEventListener('touchend',e=>{
 
 // Auto-draw to 5
 function autoDraw(who,cb){
+  // Eliminated players don't draw — their game is over
+  if(S.eliminated && S.eliminated[who]){if(cb)cb();return}
   const hand=S.hands[who]||(who===0?S.pH:S.aH);
   if(hand.length>=5){if(cb)cb();return}
   refillDeck();
@@ -3032,8 +3106,12 @@ function playCard(idx){
   if(MP.enabled&&MP.isHost)hostSync();
 }
 
-// Cards that, in 3-player mode, hit each opponent individually (so each one gets its own chance to counter)
-const MULTI_TARGET_ATTACK_IDS=['a_table_1','a_table_2','a_table_3','fromage','goinfrerie','panier'];
+// Cards that, in 3-player mode, hit each opponent individually (so each one gets its own chance to counter).
+// Fromage is excluded — it now targets ONE opponent (like À Table) but delivers 2 creatures from them.
+// Goinfrérie hits every opponent and delivers 2 creatures EACH (handled via perTargetCount=2).
+const MULTI_TARGET_ATTACK_IDS=['goinfrerie','panier'];
+// For multi-target attacks that should deliver MORE than 1 creature per target (Goinfrérie = 2)
+const MULTI_TARGET_DELIVER_COUNT={goinfrerie:2};
 
 function execCard(card,ow){
   log(`${ow===0?'⚔️':'🤖'} ${S.nicks[ow]||(ow===0?'Vous':'Adv.'+ow)}: ${card.name}`);
@@ -3059,17 +3137,44 @@ function execCard(card,ow){
     }
   }
 
-  // SOLO 3P: for multi-target attack cards, resolve each opponent one at a time
+  // SOLO 3P: À Table and Fromage variants target ONE opponent chosen by logic (most creatures; random tiebreak).
+  //   - À Table: livers 1 creature from the chosen target
+  //   - Fromage: livers 2 creatures from the chosen target
+  // Unlike Goinfrérie/Panier (which hit every opponent individually), these focus on the strongest
+  // opponent to limit their power in 3-player mode.
+  const singleTargetCards = ['a_table_1','a_table_2','a_table_3','fromage'];
+  if(!MP.enabled && NB_PLAYERS===3 && singleTargetCards.indexOf(card.id)>=0){
+    const opps = opponentsOf(ow);
+    if(opps.length === 0){
+      continueExecCard(card,ow);
+      return;
+    }
+    const countFor = op => (S.creatures[op]?S.creatures[op].length:0) + S.tbl.filter(e=>e.owner===op).length;
+    let maxCount = -1;
+    opps.forEach(op => { const n = countFor(op); if(n > maxCount) maxCount = n; });
+    const topOpps = opps.filter(op => countFor(op) === maxCount);
+    const chosenTarget = topOpps[Math.floor(Math.random() * topOpps.length)];
+    const targetName = S.nicks[chosenTarget] || (chosenTarget===0?'Vous':'Adv '+chosenTarget);
+    if(ow !== 0){
+      const casterName = S.nicks[ow] || ('Adv '+ow);
+      showToast(`🎯 ${casterName} vise ${chosenTarget===0?'VOUS':targetName} (plus de créatures)`,
+                chosenTarget===0?'red':'orange', null, 2200);
+    }
+    // Pin the target so the case handler in continueExecCard delivers from that single player only
+    S._pinnedTarget = chosenTarget;
+    tryCounterChain(card, ow, [chosenTarget], 0);
+    return;
+  }
+
+  // SOLO 3P: for multi-target attack cards (Fromage, Goinfrérie, Panier), resolve each opponent one at a time
   if(!MP.enabled && NB_PLAYERS===3 && MULTI_TARGET_ATTACK_IDS.indexOf(card.id)>=0){
     const targets=[];
     for(let i=1;i<NB_PLAYERS;i++)targets.push((ow+i)%NB_PLAYERS);
-    // Mark as pending so the caller waits for completion via S.ctrRes
     S.ctrPend=true;
     const prevCtrRes=S.ctrRes;
     resolveTargetsSequentially(card,ow,targets,0,()=>{
       applyCardSideEffects(card,ow,wasGueuleton);
       S.ctrPend=false;
-      // Signal caller that we're done (they may chain turn advancement)
       if(S.ctrRes){const cb=S.ctrRes;S.ctrRes=null;cb(false)}
       else if(prevCtrRes){prevCtrRes(false)}
     });
@@ -3151,12 +3256,18 @@ function deliverCreatureFromTarget(card,ow,target,done){
     setTimeout(done,350);
     return;
   }
-  const ci=pickCreature(pool);
-  const c=pool.splice(ci,1)[0];
-  sendToTbl(c,target,false);
-  log(`➡️ ${c.name} livré au Gargantua !`);
+  // Some cards deliver multiple creatures per target (e.g. Goinfrérie = 2).
+  // Default = 1 if the card isn't in the MULTI_TARGET_DELIVER_COUNT map.
+  const toDeliver = Math.min(pool.length, (MULTI_TARGET_DELIVER_COUNT[card.id]||1));
+  for(let i=0;i<toDeliver;i++){
+    if(!pool.length)break;
+    const ci=pickCreature(pool);
+    const c=pool.splice(ci,1)[0];
+    sendToTbl(c,target,false);
+    log(`➡️ ${c.name} livré au Gargantua !`);
+  }
   // Small delay so the player sees the animation before the next target's decision
-  setTimeout(done,650);
+  setTimeout(done,toDeliver>1?900:650);
 }
 
 // AI plays a counter card to defend against this attack
@@ -3346,13 +3457,20 @@ function continueExecCard(card,ow){
   // In 3-player mode, attack cards hit BOTH opponents
   const threePlayer=(NB_PLAYERS===3&&!MP.enabled);
   switch(card.id){
-    // À Table variants: send 1 creature from EACH opponent (3P) or 1 from the only opponent (2P)
+    // À Table variants: in 3-player mode, one pinned target (chosen in execCard by "most creatures" rule).
+    //   In 2-player mode, deliver one creature from the only opponent.
     case'a_table_1':case'a_table_2':case'a_table_3':
       if(threePlayer){
-        opponentsOf(ow).forEach(op=>{
-          const pool=S.creatures[op];
-          if(pool.length){const ci=pickCreature(pool);const c=pool.splice(ci,1)[0];sendToTbl(c,op,false)}
-        });
+        const tgt = (typeof S._pinnedTarget === 'number') ? S._pinnedTarget : opponentsOf(ow)[0];
+        S._pinnedTarget = undefined; // Consume the pin
+        if(tgt !== undefined){
+          const pool = S.creatures[tgt] || [];
+          if(pool.length){
+            const ci = pickCreature(pool);
+            const c = pool.splice(ci,1)[0];
+            sendToTbl(c, tgt, false);
+          }
+        }
       } else {
         if(enemy.length){const ci=pickCreature(enemy);const c=enemy.splice(ci,1)[0];sendToTbl(c,eOwn,false)}
       }
@@ -3366,17 +3484,25 @@ function continueExecCard(card,ow){
       eatAll();break;
     case'fromage':
       if(threePlayer){
-        // Livre 2 personnages répartis sur les adversaires
-        opponentsOf(ow).forEach(op=>{
-          const pool=S.creatures[op];
-          if(pool.length){const ci=pickCreature(pool);const c=pool.splice(ci,1)[0];sendToTbl(c,op,false)}
-        });
+        // Single target (pinned by execCard), livers 2 creatures
+        const tgt = (typeof S._pinnedTarget === 'number') ? S._pinnedTarget : opponentsOf(ow)[0];
+        S._pinnedTarget = undefined;
+        if(tgt !== undefined){
+          const pool = S.creatures[tgt] || [];
+          for(let i=0; i<2 && pool.length; i++){
+            const ci = pickCreature(pool);
+            const c = pool.splice(ci,1)[0];
+            sendToTbl(c, tgt, false);
+          }
+        }
       } else {
         for(let i=0;i<2&&enemy.length;i++){const ci=pickCreature(enemy);const c=enemy.splice(ci,1)[0];sendToTbl(c,eOwn,false)}
       }
       break;
     case'goinfrerie':
       if(threePlayer){
+        // Each opponent delivers 2 creatures to the ogre. Multi-target flow already delivered 1 per target
+        // via resolveTargetsSequentially; here we deliver a SECOND one per surviving opponent.
         opponentsOf(ow).forEach(op=>{
           const pool=S.creatures[op];
           if(pool.length){const ci=pickCreature(pool);const c=pool.splice(ci,1)[0];sendToTbl(c,op,false)}
@@ -3770,26 +3896,49 @@ function retL(){
   uHUD();
 }
 function retA(){
-  function retNext(){
-    if(!S.tbl.length){if(!S.tbl.length)stopGueu();uHUD();return}
-    const e=S.tbl.shift();
+  // Snapshot who needs to come back, then clear the table synchronously
+  // so any deferred ogrePh sees an empty table immediately.
+  const items=S.tbl.slice();
+  S.tbl.length=0;
+  if(!items.length){stopGueu();uHUD();return}
+  // Post protection flag: each return animation is ~400ms + 150ms spacing, and chkEnd/ogrePh
+  // must defer until they all land to avoid eating/eliminating creatures mid-return.
+  S._returning=(S._returning||0)+items.length;
+  (function retNext(){
+    if(!items.length){
+      stopGueu();uHUD();
+      return;
+    }
+    const e=items.shift();
     const l=getL();
     const fromX=l.tcX, fromY=l.tcY;
-    const pool=e.owner===0?S.pC:S.aC;
-    const ti=pool.length>0?pool.length-1:0;
-    const toX=e.owner===0?(l.pcX+ti*l.pcSp):(l.acX+ti*l.acSp);
-    const toY=e.owner===0?l.pcY:l.acY;
-    const tw=e.owner===0?l.SW:l.TW, th=e.owner===0?l.SH:l.TH;
+    // Route each creature to its CORRECT owner pool and row (P0 bottom, P1 top-left, P2 top-right)
+    let pool, toX, toY, tw, th;
+    if(e.owner===0){
+      pool=S.pC||S.creatures[0];
+      const ti=pool.length>0?pool.length-1:0;
+      toX=l.pcX+ti*l.pcSp; toY=l.pcY; tw=l.SW; th=l.SH;
+    } else if(e.owner===1){
+      pool=S.creatures[1]||S.aC;
+      const ti=pool.length>0?pool.length-1:0;
+      toX=l.acX+ti*l.acSp; toY=l.acY; tw=l.TW; th=l.TH;
+    } else {
+      pool=S.creatures[2]||[];
+      const ti=pool.length>0?pool.length-1:0;
+      toX=l.ac2X+ti*l.ac2Sp; toY=l.ac2Y; tw=l.TW; th=l.TH;
+    }
     if(MP.enabled&&MP.isHost){
+      const ti=pool.length>0?pool.length-1:0;
       mpAnim('return',e.card,{kind:'table',idx:0},{kind:'creature',owner:e.owner,idx:ti},{dur:400});
     }
     addAn(e.card,fromX,fromY,toX,toY,400,()=>{
       returnToPool(pool,e.card);
       spP(toX+tw/2,toY+th/2,'#44ff44',8);
-      uHUD();setTimeout(retNext,150);
+      S._returning=Math.max(0,(S._returning||1)-1);
+      uHUD();
+      setTimeout(retNext,150);
     },{fw:l.SW,fh:l.SH,tw,th});
-  }
-  retNext();
+  })();
 }
 function resO(){
   const mine=S.tbl.filter(e=>e.owner===0);
@@ -4125,7 +4274,14 @@ function finAiFor(who,cb){
   setTimeout(()=>{
     chkEnd();
     if(S.phase==='end')return;
-    const next=(who+1)%NB_PLAYERS;
+    if(!S.eliminated)S.eliminated=new Array(NB_PLAYERS).fill(false);
+    // Find next non-eliminated player
+    let next=(who+1)%NB_PLAYERS;
+    let safety=0;
+    while(S.eliminated[next] && safety<NB_PLAYERS){
+      next=(next+1)%NB_PLAYERS;
+      safety++;
+    }
     S.cur=next;S.turn++;S.can=(next===0);
     uHUD();
     log(`📝 Tour ${S.turn} — ${S.nicks[next]||'J'+next}`);
@@ -4288,6 +4444,47 @@ function ogrePh(){
   }
 }
 
+// Eliminate a player: animate their remaining hand cards to the discard pile one by one,
+// then mark them as eliminated so their turns are skipped.
+// Called from chkEnd when a player loses all their creatures (including ones on the table).
+function eliminatePlayer(p){
+  if(!S.eliminated)S.eliminated=[false,false,false];
+  if(S.eliminated[p])return; // Already eliminated
+  S.eliminated[p]=true;
+  const nick=S.nicks[p]||(p===0?'Vous':'Adv '+p);
+  log(`💀 ${nick} est ÉLIMINÉ !`);
+  showToast(`💀 ${nick} est éliminé !`, 'red', 'Plus aucune créature à livrer.', 3000);
+  // Remaining hand cards animate to the discard pile
+  const hand=S.hands[p]||[];
+  if(!hand.length)return;
+  const l=getL();
+  // Starting position depends on which row the player occupies
+  let baseX, baseY, stepX;
+  if(p===0){
+    baseX=l.phX; baseY=l.phY; stepX=l.phSp;
+  } else if(p===1){
+    baseX=l.ahX; baseY=l.ahY; stepX=l.ahSp;
+  } else {
+    baseX=l.ah2X; baseY=l.ah2Y; stepX=l.ah2Sp;
+  }
+  // Snapshot cards before clearing hand (clearing keeps rendering clean during the animation stream)
+  const toDiscard=hand.slice();
+  hand.length=0;
+  uHUD();
+  // Stagger the animations: each card flies to the discard with ~120ms spacing
+  toDiscard.forEach((c,i)=>{
+    setTimeout(()=>{
+      const fromX=baseX+i*stepX, fromY=baseY;
+      const fw=(p===0)?l.CW:l.TW, fh=(p===0)?l.CH:l.TH;
+      addAn(c, fromX, fromY, l.ddX, l.ddY, 500, ()=>{
+        S.discard.push(c);
+        spP(l.ddX+l.ddW/2, l.ddY+l.ddH/2, '#888', 8);
+        uHUD();
+      }, {back:(p!==0), fw, fh, tw:l.ddW, th:l.ddH});
+    }, i*120);
+  });
+}
+
 function chkEnd(){
   // Defer the end-of-game check if creatures are currently animating back from the table.
   // Otherwise the player might be declared dead while their last creature is still in transit.
@@ -4295,12 +4492,20 @@ function chkEnd(){
     setTimeout(chkEnd,200);
     return;
   }
+  // Ensure elimination array exists
+  if(!S.eliminated)S.eliminated=new Array(NB_PLAYERS).fill(false);
   // Count surviving creatures for each player
   const alive=[];
   for(let p=0;p<NB_PLAYERS;p++){
     alive.push((S.creatures[p]?S.creatures[p].length:0) + S.tbl.filter(e=>e.owner===p).length);
   }
-  // Count how many players are eliminated
+  // Detect newly-eliminated players (0 creatures and not already marked) — trigger discard animation
+  for(let p=0;p<NB_PLAYERS;p++){
+    if(alive[p]===0 && !S.eliminated[p]){
+      eliminatePlayer(p);
+    }
+  }
+  // Count living players (those with creatures remaining)
   const livingPlayers=alive.map((n,i)=>n>0?i:-1).filter(i=>i>=0);
   if(livingPlayers.length===0)return endG('draw');
   if(livingPlayers.length===1){
@@ -4309,11 +4514,15 @@ function chkEnd(){
     if(winner===0)return endG('win');
     return endG('lose');
   }
-  // In 3-player mode: game ends as soon as P0 (you) are eliminated OR all opponents are dead
+  // In 3-player mode: the game only ENDS when:
+  //  (a) P0 (you) are eliminated
+  //  (b) only one player remains alive (handled above)
+  // If P0 is alive AND multiple opponents are alive (or one remains), the game continues with
+  // the remaining players — eliminated players are skipped in finTurn rotation.
   if(NB_PLAYERS>=3){
     if(alive[0]===0)return endG('lose');
-    const allOpponentsDead=alive.slice(1,NB_PLAYERS).every(a=>a===0);
-    if(allOpponentsDead)return endG('win');
+    // If only P0 remains alive (both opponents dead), P0 wins — caught above by livingPlayers.length===1
+    // Otherwise continue: eliminatePlayer has already been called for newly-dead opponents.
   } else {
     // 2-player classic
     if(alive[0]===0&&alive[1]===0)return endG('draw');
