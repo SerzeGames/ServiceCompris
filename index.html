@@ -1772,38 +1772,35 @@ function nextPlayer(i){
 function shuf(a){for(let i=a.length-1;i>0;i--){const j=0|Math.random()*(i+1);[a[i],a[j]]=[a[j],a[i]]}return a}
 
 // Refill deck from discard pile when empty
-function refillDeck(){
-  if(S.dk.length>0)return;
-  if(S.discard.length===0){
-    // Emergency fallback: both deck and discard are empty.
-    // Limit to 2 emergency refills per game to avoid infinite stalemate games.
-    if(S._emergencyRefills===undefined)S._emergencyRefills=0;
-    if(S._emergencyRefills>=2){
-      log('⚠️ Pioche épuisée — la partie doit se conclure.');
-      return;
-    }
-    S._emergencyRefills++;
-    const fresh=[];
+// Infinite deck: each draw generates a new random card from the ACTIONS pool.
+// We keep S.dk populated only as a visual indicator (pile thickness) — its actual contents are
+// regenerated on the fly. The discard pile grows organically from played/expired cards.
+//
+// This prevents "stalemate from empty deck" scenarios and guarantees that every draw gives a fresh
+// card based on the original card distribution (count weights are preserved).
+function generateRandomCard(){
+  // Build a weighted pool of action card templates the FIRST time we need it
+  if(!generateRandomCard._pool){
+    const pool=[];
     ACTIONS.forEach(a=>{
-      if(a.type==='attack'||a.type==='special'){
-        for(let i=0;i<Math.max(1,Math.floor(a.count/2));i++){
-          fresh.push({...a,isCrea:false,uid:Math.random().toString(36).slice(2)});
-        }
-      }
+      const weight=Math.max(1,a.count|0);
+      for(let i=0;i<weight;i++) pool.push(a);
     });
-    if(fresh.length>0){
-      S.dk=fresh;
-      shuf(S.dk);
-      log(`♻️ Pioche de secours #${S._emergencyRefills} : nouvelles cartes générées !`);
-      uHUD();
-    }
-    return;
+    generateRandomCard._pool=pool;
   }
-  // Move all discard back into deck and shuffle
-  S.dk=S.discard.splice(0);
-  shuf(S.dk);
-  log('🔄 Pioche reconstituée depuis la défausse !');
-  uHUD();
+  const pool=generateRandomCard._pool;
+  const tpl=pool[Math.floor(Math.random()*pool.length)];
+  // Each card gets a fresh unique id (uid) so duplicate-detection in MP snapshots works correctly
+  return {...tpl,isCrea:false,uid:Math.random().toString(36).slice(2,10)};
+}
+
+function refillDeck(){
+  // The deck is conceptually infinite. We just maintain a visual stack:
+  // pre-fill S.dk with placeholder cards so the visual thumbnail and count work.
+  // Each "draw" pops from this stack; we generate a new card on demand to keep the pool topped up.
+  while(S.dk.length<20){
+    S.dk.push(generateRandomCard());
+  }
 }
 function lerp(a,b,t){return a+(b-a)*t}
 function log(m){
@@ -3791,8 +3788,13 @@ function sendToTbl(card,owner,front){
     const crIdx=(owner===0?S.pC.length:S.aC.length);
     mpAnim('sendTable',card,{kind:'creature',owner,idx:crIdx},{kind:'table',idx,owner},{dur:500});
   }
-  if(front)S.tbl.unshift({card,owner,_fly:true});
-  else S.tbl.push({card,owner,_fly:true});
+  // Mark with the turn the creature arrives on the table.
+  // The ogre's gueuleton phase ignores creatures that arrived THIS turn (otherwise an attack played
+  // on a turn where gueuleton is active would have its delivered creature eaten immediately —
+  // confusing because the player just put it there).
+  const arrivalTurn = S.turn;
+  if(front)S.tbl.unshift({card,owner,_fly:true,_arrivedTurn:arrivalTurn});
+  else S.tbl.push({card,owner,_fly:true,_arrivedTurn:arrivalTurn});
   // Protection flag: creatures in transit should not be eaten or affected
   // by ogre/attack animations until they've landed on the table.
   S._sending=(S._sending||0)+1;
@@ -3831,12 +3833,27 @@ function eatN(n){
       if(!S.tbl.length)stopGueu();
       setTimeout(()=>{S.oE=false},800);uHUD();chkEnd();return;
     }
+    // Find the leftmost creature that's NOT freshly-arrived this turn.
+    // Creatures placed on the table during the current turn (S._arrivedTurn === S.turn) are protected
+    // from being eaten by the ogre's gueuleton phase. They become eligible at the START of the NEXT turn.
+    let idx = -1;
+    for(let i=0; i<S.tbl.length; i++){
+      const e = S.tbl[i];
+      if(e._arrivedTurn === undefined || e._arrivedTurn < S.turn){
+        idx = i; break;
+      }
+    }
+    if(idx < 0){
+      // All remaining creatures are freshly-arrived this turn → no eating possible
+      log('🛡️ Aucune créature à dévorer (toutes fraîchement livrées).');
+      if(!S.tbl.length)stopGueu();
+      setTimeout(()=>{S.oE=false},800);uHUD();chkEnd();return;
+    }
     const l=getL();
-    const fromX=l.tcX+0*l.tSp, fromY=l.tcY;
-    const e=S.tbl.shift();
-    // Broadcast to client
+    const fromX=l.tcX+idx*l.tSp, fromY=l.tcY;
+    const e=S.tbl.splice(idx,1)[0];
     if(MP.enabled&&MP.isHost){
-      mpAnim('eat',e.card,{kind:'table',idx:0},{kind:'plate'},{dur:450});
+      mpAnim('eat',e.card,{kind:'table',idx},{kind:'plate'},{dur:450});
     }
     addAn(e.card,fromX,fromY,l.plateX,l.plateY,450,()=>{
       S.eat.push(e.card);
